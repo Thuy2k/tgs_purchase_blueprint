@@ -1,0 +1,2772 @@
+================================================================================
+  THIẾT KẾ HỆ THỐNG MUA BÁN HÀNG - THẾ GIỚI SỮA (650 CỬA HÀNG)
+  WordPress Multisite POS System
+  Ngày tạo: 13/02/2026
+  Cập nhật: 07/03/2026 (v9c — Thêm C9 auto-reorder suggestion + fix backup C2c)
+  Tổng: 18 bảng (5 bảng local + 2 bảng global cũ + 11 bảng global mới)
+================================================================================
+
+  ⚠️ LƯU Ý THUẬT NGỮ TRÙNG TÊN:
+  - "lot" trong B2 (global_product_lots) = 1 SP VẬT LÝ (1 lon sữa, 1 hộp bỉm)
+  - "lot" trong C2 (purchase_lot)        = 1 LÔ MUA NCC (cam kết mua N sản phẩm)
+  - Hai khái niệm HOÀN TOÀN KHÁC NHAU, chỉ trùng tên tiếng Anh.
+  - Khi đọc cột lot_id → xem bảng nào:
+      batch.lot_id          → C2 purchase_lot (lô mua NCC)
+      ledger_item.list_product_lots → B2 global_product_lots (SP vật lý)
+      product_lots.batch_id → C5 batch (batch lá)
+  - Trong code: B2.lot_code = mã lô HSD vật lý, C2.lot_code = mã lô mua NCC
+
+
+================================================================================
+PHẦN A — BẢNG CŨ ĐÃ CÓ (mỗi blog_id 1 bộ, bổ sung vài cột mới)
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+A1. wp_{blog_id}_local_product_name — Sản phẩm
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi shop 1 bảng. SP chia 2 loại: tracking HSD và không tracking.
+
+  local_product_name_id          BIGINT PK AUTO_INCREMENT
+  local_product_name             TEXT                        -- Tên sản phẩm
+  local_product_sku              VARCHAR(255)                -- Mã SKU (chung toàn hệ thống)
+  local_product_status           VARCHAR(255)                -- 1=hoạt động, 0=ngừng
+  local_product_is_tracking      TINYINT                     -- 1=theo dõi HSD, 0=không
+  local_product_quantity_no_tracking  DECIMAL(15,3) DEFAULT 0 -- SL tồn kho (SP ko tracking)
+  local_product_price            DECIMAL(15,3)               -- Giá tham khảo trước thuế
+  local_product_tax              DECIMAL(15,3)               -- % thuế tham khảo
+  local_product_price_after_tax  DECIMAL(15,3)               -- Giá sau thuế tham khảo
+  local_product_list_category_id JSON                        -- [1, 3, 5] thuộc danh mục nào
+  weighted_avg_cost              DECIMAL(15,3)               -- 🆕 Giá vốn BQ gia quyền (cập nhật mỗi lần nhập batch mới)
+  user_id                        INTEGER
+  is_deleted                     TINYINT                     -- 0=chưa xóa
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+Ghi chú:
+  - weighted_avg_cost cập nhật bằng công thức:
+    WAC = SUM(batch_remaining_qty × batch_avg_cost) / SUM(batch_remaining_qty)
+    (chỉ tính batch lá còn tồn tại shop đó)
+  - local_product_sku là cầu nối giữa các shop (cùng SP nhưng khác blog_id)
+
+
+────────────────────────────────────────────────────────────────────────────────
+A2. wp_{blog_id}_local_ledger_person — NCC / Khách hàng
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi shop 1 bảng. Lưu cả NCC và khách hàng.
+
+  local_ledger_person_id         BIGINT PK AUTO_INCREMENT
+  local_ledger_person_code       VARCHAR(255)                -- Mã
+  local_ledger_person_name       VARCHAR(255)                -- Tên
+  local_ledger_person_type       TINYINT                     -- 1=NCC, 2=khách hàng
+  local_ledger_person_email      VARCHAR(255)
+  local_ledger_person_phone      VARCHAR(255)
+  local_ledger_person_status     INTEGER                     -- Trạng thái hoạt động
+  user_id                        INTEGER
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+
+────────────────────────────────────────────────────────────────────────────────
+A3. wp_{blog_id}_local_ledger — Phiếu (mua/bán/thu/chi/xuất/nhập...)
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi shop 1 bảng. Bảng trung tâm cho mọi giao dịch.
+
+  local_ledger_id                BIGINT PK AUTO_INCREMENT
+  local_ledger_code              VARCHAR(255)                -- Mã phiếu
+  local_ledger_title             TEXT                        -- Tiêu đề
+  local_ledger_type              TINYINT                     -- Loại phiếu (xem bảng mã bên dưới)
+  local_ledger_item_id           JSON                        -- [1, 2, 3] list ledger_item_id
+  local_ledger_person_id         BIGINT                      -- NCC hoặc khách hàng
+  local_ledger_total_amount      DECIMAL(15,3)               -- Tổng tiền
+  local_ledger_parent_id         BIGINT                      -- Phiếu cha
+  local_ledger_approver_status   TINYINT                     -- 1=đã duyệt
+  purchase_policy_id             BIGINT                      -- 🆕 Chính sách mua nào
+  contract_id                    BIGINT                      -- 🆕 Hợp đồng NCC nào
+  lot_id                         BIGINT                      -- 🆕🆕 Thuộc lô mua NCC nào (24/02)
+  user_id                        INTEGER
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  BẢNG MÃ local_ledger_type:
+    1  = phiếu nhập hàng (nhập kho)
+    6  = phiếu hủy hàng
+    7  = phiếu thu tiền
+    8  = phiếu chi tiền
+    9  = phiếu mua hàng (đặt mua từ NCC)
+    10 = phiếu bán hàng
+    11 = phiếu hoàn hàng
+    12 = phiếu xuất hàng nội bộ
+    13 = nhập hàng nội bộ
+    14 = trả hàng nội bộ
+    15 = nhận trả hàng nội bộ
+
+
+────────────────────────────────────────────────────────────────────────────────
+A4. wp_{blog_id}_local_ledger_item — Dòng trong phiếu
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi shop 1 bảng. Mỗi dòng = 1 SP trong phiếu.
+
+  local_ledger_item_id           BIGINT PK AUTO_INCREMENT
+  local_ledger_id                BIGINT                      -- Thuộc phiếu nào
+  local_product_name_id          BIGINT                      -- Sản phẩm nào
+  quantity                       DECIMAL(15,3)               -- Số lượng
+  price                          DECIMAL(15,3)               -- Giá
+  list_product_lots              JSON                        -- List lot_id (SP tracking HSD)
+  local_ledger_item_discount     DECIMAL(15,3)               -- % chiết khấu
+  local_ledger_item_discount_type VARCHAR(255)               -- Loại CK (%)
+  local_ledger_item_discount_amount DECIMAL(15,3)            -- Tổng tiền CK
+  local_ledger_item_tax_percent  DECIMAL(15,3)               -- % thuế
+  local_ledger_item_tax_amount   DECIMAL(15,3)               -- Tổng tiền thuế
+  local_ledger_item_gift_type    TINYINT                     -- 1=hàng tặng
+  local_ledger_item_type         VARCHAR(255)                -- 1=nhập, 2=xuất, 6=hủy
+  batch_id                       BIGINT                      -- 🆕 Thuộc batch nào
+  pp_item_id                     BIGINT                      -- 🆕 Áp dòng chính sách mua nào
+  selling_policy_id              BIGINT                      -- 🆕 Áp chính sách bán nào
+  batch_cost_breakdown           JSON                        -- 🆕 FIFO: [{"batch_id":1,"qty":3,"unit_cost":15000}]
+  user_id                        INTEGER
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  Ghi chú batch_cost_breakdown:
+    - Khi BÁN SP không tracking, hệ thống tự FIFO trừ batch lá (leaf) cũ nhất
+    - VD: bán 5 gói → batch A còn 3 + batch B trừ 2
+    - Ghi: [{"batch_id":A,"qty":3,"unit_cost":15000},{"batch_id":B,"qty":2,"unit_cost":16000}]
+
+
+────────────────────────────────────────────────────────────────────────────────
+A5. wp_{blog_id}_transfer_ledger — Luân chuyển nội bộ
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi shop 1 bảng. Theo dõi hàng di chuyển giữa các shop.
+
+  transfer_ledger_id             BIGINT PK AUTO_INCREMENT
+  source_blog_id                 BIGINT NOT NULL             -- Từ shop nào
+  source_ledger_id               BIGINT NOT NULL             -- Phiếu xuất
+  destination_blog_id            BIGINT NOT NULL             -- Đến shop nào
+  destination_ledger_id          BIGINT                      -- Phiếu nhập
+  transfer_type                  TINYINT DEFAULT 1           -- 1=điều chuyển, 3=trả hàng
+  created_at                     DATETIME NOT NULL
+
+
+================================================================================
+PHẦN B — BẢNG GLOBAL CŨ (1 bảng duy nhất toàn hệ thống)
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+B1. wp_global_product_cat — Danh mục sản phẩm
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: 1 bảng duy nhất. Mã danh mục dùng làm TIỀN TỐ batch_code.
+
+  global_product_cat_id          BIGINT PK AUTO_INCREMENT
+  global_product_cat_code        VARCHAR(250)                -- Mã danh mục (VD: SUA-BOT, BIM-TA)
+  global_product_cat_name        VARCHAR(250)                -- Tên danh mục
+  global_product_cat_path        VARCHAR(500)                -- Đường dẫn (Sữa/Sữa bột/...)
+  global_product_cat_status      TINYINT DEFAULT 1           -- Trạng thái
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+
+────────────────────────────────────────────────────────────────────────────────
+B2. wp_global_product_lots — Mã định danh (lot) từng SP vật lý
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: 1 bảng duy nhất. CHỈ dùng cho SP CÓ tracking HSD.
+
+  global_product_lot_id          BIGINT PK AUTO_INCREMENT
+  global_product_lot_barcode     VARCHAR(255)                -- Mã vạch định danh
+  global_product_lot_price       DECIMAL(15,3)               -- Giá bán
+  to_blog_id                     BIGINT                      -- Đang ở shop nào
+  local_product_lot_is_active    TINYINT DEFAULT 2           -- 0=đã bán, 1=trong kho, 2=chờ duyệt, 3=hủy
+  lot_code                       VARCHAR(255)                -- Mã lô
+  exp_date                       DATE                        -- Hạn sử dụng
+  local_product_sku              VARCHAR(255)                -- SKU sản phẩm
+  batch_id                       BIGINT                      -- 🆕 Thuộc batch nào (batch lá)
+  user_id                        INTEGER
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  Ghi chú:
+    - Mỗi lot = 1 SP vật lý (1 lon sữa, 1 hộp bỉm...)
+    - lot gắn vào batch LÁ (leaf batch, không có con) qua batch_id
+    - SP không tracking KHÔNG CÓ lot, chỉ quản lý qua batch + FIFO
+
+
+================================================================================
+PHẦN C — 8 BẢNG GLOBAL MỚI (cập nhật 24/02/2026)
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+C1. wp_global_supplier_contract — Hợp đồng NCC
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: 1 NCC có thể có nhiều hợp đồng. Hợp đồng = khung thỏa thuận chung.
+       Mỗi hợp đồng chỉ gắn với MỘT lô mua duy nhất (quan hệ 1:1).
+       Khi TẠO HĐ → hệ thống TỰ SINH 1 lô mua (C2) kèm theo.
+       Mã lô tự sinh từ mã HĐ: lot_code = contract_code + "-LOT".
+       Sau khi tạo, user vào lô để thêm sản phẩm (lot_item), chính sách...
+       Hợp đồng không bắt buộc — mua lẻ/gấp có thể bỏ qua (tạo lô riêng).
+
+  contract_id                    BIGINT PK AUTO_INCREMENT
+  contract_code                  VARCHAR(100)                -- Mã hợp đồng
+  contract_title                 TEXT                        -- Tên hợp đồng
+  ledger_person_id               BIGINT                      -- NCC nào
+  ledger_person_blog_id          BIGINT                      -- Blog chứa NCC
+  contract_start_date            DATE                        -- Bắt đầu
+  contract_end_date              DATE                        -- Kết thúc
+  contract_terms                 JSON                        -- Điều khoản khung (TT, trả chậm...)
+  contract_status                TINYINT                     -- 0=draft, 1=active, 2=expired, 3=cancelled
+  contract_meta                  JSON                        -- File đính kèm, ghi chú
+  source_blog_id                 BIGINT                      -- Tạo từ node nào
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  Ví dụ contract_terms (chỉ chứa KHUNG, không chứa CK cụ thể):
+  {
+    "payment_method": "bank_transfer",
+    "credit_days": 30,
+    "currency": "VND",
+    "bank_account": "123456789 - Vietcombank",
+    "notes": "Thanh toán cuối tháng"
+  }
+
+
+────────────────────────────────────────────────────────────────────────────────
+C2. wp_global_purchase_lot — 🆕 LÔ MUA NCC (Tầng 1)
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Cam kết mua SL lớn từ NCC, nhập nhiều đợt, NHIỀU sản phẩm.
+       Mỗi hợp đồng chỉ có MỘT lô mua (quan hệ 1:1, UNIQUE contract_id).
+       🆕 Khi tạo HĐ → hệ thống TỰ SINH lô này (lot rỗng, chờ thêm SP).
+       🆕 Mã lô TỰ SINH từ mã HĐ, KHÔNG nhập tay.
+       Mỗi lô = "lời hứa mua N sản phẩm × SL cam kết trong thời gian Y".
+       Chi tiết từng SP → xem C2b purchase_lot_item.
+       Nhập hàng thực tế chia nhiều đợt → mỗi đợt sinh batch.
+       Công nợ tính theo từng đợt nhập (không phải toàn lô).
+
+  lot_id                         BIGINT PK AUTO_INCREMENT
+  lot_code                       VARCHAR(100)                -- TỰ SINH: {contract_code}-LOT
+                                                             -- VD: HD-VNM-2026-001-LOT
+                                                             -- Nếu không có HĐ: NCC-{mã_NCC}-{YYYYMMDD}-LOT
+  lot_title                      TEXT                        -- TỰ SINH: "Lô mua — " + contract_title
+                                                             -- Có thể sửa lại sau
+  lot_description                TEXT                        -- Mô tả chi tiết
+  contract_id                    BIGINT UNIQUE               -- Thuộc hợp đồng nào (nullable, UNIQUE — 1 HĐ chỉ 1 lô)
+  ledger_person_id               BIGINT                      -- NCC
+  ledger_person_blog_id          BIGINT                      -- Blog chứa NCC
+  -- (purchase_policy_id ĐÃ BỎ — tránh FK vòng. Policy trỏ về lot qua C3.lot_id)
+
+  -- CAM KẾT (chi tiết từng SP → xem C2b lot_item) --
+  lot_total_committed_value      DECIMAL(15,3)               -- Tổng giá trị cam kết = SUM(lot_item.committed_value)
+  lot_total_items                INT DEFAULT 0               -- Số dòng SP trong lô (cache count)
+
+  -- THỜI GIAN --
+  lot_start_date                 DATE                        -- Bắt đầu cam kết
+  lot_end_date                   DATE                        -- Kết thúc cam kết
+
+  -- GỢI Ý TÁI NHẬP --
+  auto_reorder_enabled           TINYINT DEFAULT 0           -- 1=tự gợi ý nhập tiếp khi batch bán gần hết
+  reorder_notify_roles           JSON                        -- Ai nhận thông báo ["admin","purchaser"]
+  -- (reorder_threshold_percent đã chuyển xuống C2b — mỗi SP có ngưỡng riêng)
+
+  -- TRẠNG THÁI --
+  lot_status                     TINYINT                     -- 0=draft, 1=active, 2=completed, 3=cancelled
+  lot_meta                       JSON                        -- Mở rộng
+  source_blog_id                 BIGINT                      -- Tạo từ node nào
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  QUAN HỆ:
+    1 Hợp đồng ↔ 1 Lô mua (1:1, UNIQUE contract_id trên C2)
+    Tạo HĐ → TỰ SINH lô (lot rỗng) → user thêm lot_item sau
+    1 Lô mua → N Dòng SP (purchase_lot_item C2b) — mỗi SKU 1 dòng
+    1 Lô mua → N Phiếu mua (mỗi đợt nhập = 1 phiếu, có thể nhập vài SKU)
+    1 Lô mua → N Batch (mỗi đợt nhập mỗi SKU = 1 batch gốc)
+    1 Lô mua ← 1 Chính sách (CS.lot_id trỏ về lot — FK 1 chiều, KHÔNG lưu ngược)
+    Hoặc: lô không cần hợp đồng (contract_id = NULL) — mua lẻ/gấp, tạo lô riêng
+    Hoặc: lô chưa có chính sách (tạo lô trước, gắn CS sau)
+
+  CÁCH DÙNG:
+    1. Tạo HĐ Vinamilk → hệ thống TỰ SINH lô (lot_code = HD-VNM-2026-001-LOT)
+    2. Vào lô → thêm lot_item (C2b): Dielac 5,000, Grow 3,000, sữa tươi 2,000
+    3. Tạo chính sách mua (C3) với lot_id = lô này → CS tự biết phục vụ lô nào
+    4. Đợt 1: tạo phiếu mua Dielac 2,000 + Grow 1,000 → duyệt → sinh batch → công nợ đợt 1
+    5. Bán gần hết → hệ thống gợi ý (theo từng SKU): "Dielac còn 900/5,000 (18%). Tạo phiếu mua?"
+    6. Đợt 2: tạo phiếu mua Dielac 1,500 + sữa tươi 1,000 → duyệt → batch → công nợ đợt 2
+    7. ... cho đến khi nhập đủ từng SKU hoặc hết thời gian cam kết
+
+  CÁCH DÙNG MUA LẺ / GẤP (không cần HĐ):
+    1. Tạo lô riêng (contract_id = NULL)
+    2. Mã lô tự sinh: NCC-{mã_NCC}-{YYYYMMDD}-LOT
+    3. Thêm lot_item, tạo phiếu mua... (giống bước 2-7 ở trên)
+    4. Hoặc bỏ qua lô luôn → tạo phiếu mua trực tiếp (lot_id = NULL)
+
+  GỢI Ý QUYỀN LỢI NCC:
+    Khi lot_item.imported_qty đạt mốc tích lũy (trong policy_item type=7):
+    → Hệ thống thông báo: "Dielac: đã mua 4,500/5,000 — đạt CK bậc 3 (8%)"
+    → Gợi ý đòi thêm quyền lợi từ NCC (theo từng SKU hoặc toàn lô)
+
+  VÍ DỤ:
+    lot_code: HD-VNM-2026-Q1-LOT    (tự sinh từ contract_code "HD-VNM-2026-Q1")
+    lot_title: "Lô mua — HĐ Vinamilk Q1/2026"
+    lot_total_committed_value: 1550000000   (tổng ~ 1.55 tỷ)
+    lot_total_items: 3
+    auto_reorder_enabled: 1
+
+    lot_items (C2b):
+      ┌──────────┬──────────────┬────────────┬──────────┬────────────┐
+      │ SKU      │ committed_qty│ unit_price │ imported │ remaining  │
+      ├──────────┼──────────────┼────────────┼──────────┼────────────┤
+      │ SKU-DL01 │    5,000     │  180,000   │  3,500   │   1,500    │
+      │ SKU-GR02 │    3,000     │  150,000   │  1,000   │   2,000    │
+      │ SKU-TU03 │    2,000     │  100,000   │  1,000   │   1,000    │
+      └──────────┴──────────────┴────────────┴──────────┴────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+C2b. wp_global_purchase_lot_item — 🆕 Dòng sản phẩm trong lô mua
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi dòng = 1 SKU trong lô mua. 1 lô có N dòng (N sản phẩm).
+       Quản lý cam kết, tiến độ nhập, ngưỡng gợi ý nhập tiếp THEO TỪNG SP.
+       Khi batch (C5) được tạo, liên kết ngược qua (lot_id + product_sku).
+
+  lot_item_id                    BIGINT PK AUTO_INCREMENT
+  lot_id                         BIGINT FK → C2              -- Thuộc lô mua nào
+  product_sku                    VARCHAR(255)                 -- SKU sản phẩm
+  product_name_cache             VARCHAR(500)                 -- Tên SP (cache, tránh join)
+
+  -- CAM KẾT --
+  committed_qty                  DECIMAL(15,3)                -- SL cam kết mua
+  committed_unit_price           DECIMAL(15,3)                -- Giá cam kết / đơn vị (trước CK, thuế)
+  committed_value                DECIMAL(15,3)                -- = committed_qty × committed_unit_price
+
+  -- TIẾN ĐỘ NHẬP --
+  imported_qty                   DECIMAL(15,3) DEFAULT 0      -- Đã nhập = SUM(batch.total_qty WHERE lot_id & sku)
+  remaining_qty                  DECIMAL(15,3)                -- Chưa nhập = committed_qty - imported_qty
+
+  -- GỢI Ý TÁI NHẬP (per-SKU) --
+  reorder_threshold_percent      DECIMAL(5,2) DEFAULT 20      -- Ngưỡng %: khi tồn kho batch_lá ≤ X% × committed_qty → nhắc
+                                                              -- VD: committed=5000, tồn=900 → 18% < 20% → nhắc
+
+  -- MỞ RỘNG --
+  lot_item_note                  TEXT                         -- Ghi chú
+  lot_item_meta                  JSON                         -- Mở rộng
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  RÀNG BUỘC:
+    UNIQUE (lot_id, product_sku) — mỗi lô chỉ có 1 dòng cho mỗi SKU
+
+  QUAN HỆ:
+    1 Lô mua (C2) → N lot_item (C2b)
+    1 lot_item ← N batch (C5) — qua (lot_id + product_sku)
+    lot_item.imported_qty = SUM(batch.batch_total_quantity WHERE lot_id=X AND product_sku=S)
+
+  CÁCH DÙNG:
+    1. Tạo lô "Lô mua Vinamilk Q1/2026"
+    2. Thêm 3 dòng lot_item:
+       - SKU-DL01 (Dielac Alpha): 5,000 thùng × 180,000đ = 900,000,000đ
+       - SKU-GR02 (Dielac Grow): 3,000 thùng × 150,000đ  = 450,000,000đ
+       - SKU-TU03 (Sữa tươi):   2,000 thùng × 100,000đ  = 200,000,000đ
+    3. lot.lot_total_committed_value = 1,550,000,000đ (auto SUM)
+    4. Đợt 1 nhập Dielac 2,000 + Grow 1,000 → cập nhật imported_qty từng dòng
+    5. Khi Dielac tồn < 20% × 5,000 = 1,000 → gợi ý nhập tiếp Dielac
+
+  VÍ DỤ:
+    lot_item_id: 1
+    lot_id: 5  (VNM-LOT-2026-Q1)
+    product_sku: SKU-DL01
+    product_name_cache: "Dielac Alpha Gold 900g"
+    committed_qty: 5000
+    committed_unit_price: 180000
+    committed_value: 900000000
+    imported_qty: 3500
+    remaining_qty: 1500
+    reorder_threshold_percent: 20.00
+
+
+────────────────────────────────────────────────────────────────────────────────
+C2c. wp_global_lot_item_shop_config — 🆕 Cấu hình tồn kho MIN/MAX theo shop
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi dòng = 1 cấu hình min/max cho 1 SKU trong lô (lot_item) tại 1 shop (blog_id).
+       Dùng cho: giám sát tồn kho theo shop → cảnh báo khi tồn < min hoặc > max.
+       Với 650 shop × N SKU/lô → bảng riêng thay vì JSON (performance + query linh hoạt).
+       Liên kết ngược: lot_item (C2b) → config (C2c) → batch_distribution trên C5.
+
+  config_id                      BIGINT PK AUTO_INCREMENT
+  lot_item_id                    BIGINT FK → C2b             -- Dòng SP nào trong lô
+  lot_id                         BIGINT FK → C2              -- Denormalize cho query nhanh
+  product_sku                    VARCHAR(255)                 -- Denormalize (tránh JOIN C2b)
+  blog_id                        BIGINT NOT NULL              -- Shop nào (multisite blog_id)
+  blog_name_cache                VARCHAR(255)                 -- Tên shop (cache, tránh switch_to_blog)
+
+  -- TỒN KHO MIN/MAX --
+  min_qty                        DECIMAL(15,3) DEFAULT 0     -- Tồn tối thiểu tại shop này
+  max_qty                        DECIMAL(15,3) DEFAULT 0     -- Tồn tối đa tại shop này
+                                                             -- 0 = không giới hạn (không giám sát)
+
+  -- TRẠNG THÁI --
+  is_active                      TINYINT DEFAULT 1           -- 1=đang giám sát, 0=tắt
+
+  -- MỞ RỘNG --
+  config_note                    TEXT                        -- Ghi chú
+  config_meta                    JSON                        -- Mở rộng (VD: ngày review tiếp, lý do...)
+  user_id                        BIGINT
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  RÀNG BUỘC:
+    UNIQUE (lot_item_id, blog_id) — mỗi shop chỉ có 1 cấu hình cho mỗi lot_item
+
+  INDEX:
+    (lot_id, blog_id) — query "tất cả config của shop X trong lô Y"
+    (product_sku, blog_id) — query "tất cả config của shop X cho SKU S"
+    (blog_id) — query "tất cả config của shop X"
+
+  QUAN HỆ:
+    1 lot_item (C2b) → N config (C2c) — mỗi shop 1 bản ghi
+    1 shop (blog_id) → N config (C2c) — mỗi lot_item 1 bản ghi
+
+  CÁCH DÙNG:
+    1. Vào chi tiết lô (lots/detail.php) → tab/section "Cấu hình tồn kho theo shop"
+    2. Chọn lot_item (SKU) → hiện bảng: mỗi dòng = 1 shop, cột min/max
+    3. Nhập min/max cho từng shop hoặc "Áp dụng hàng loạt" (cùng min/max cho N shop)
+    4. Hệ thống định kỳ kiểm tra:
+       SUM(batch_lá.batch_distribution[blog_id].qty
+           - batch_lá.batch_distribution[blog_id].sold
+           - batch_lá.batch_distribution[blog_id].damaged
+           - batch_lá.batch_distribution[blog_id].transferred_out)
+       WHERE batch.lot_id = X AND batch.product_sku = S
+       So sánh với config.min_qty, config.max_qty → gửi cảnh báo
+
+  CẢNH BÁO:
+    Tồn < min_qty → ⚠️ "Shop Quận 1: Dielac tồn 15, min = 50. Cần bổ sung 35."
+    Tồn > max_qty → ⚠️ "Shop Quận 1: Dielac tồn 120, max = 100. Cần điều chuyển 20."
+    → Gửi cho reorder_notify_roles ở C2 (purchase_lot)
+
+  VÍ DỤ:
+    config_id: 1
+    lot_item_id: 1  (Dielac Alpha trong lô VNM-Q1-2026)
+    lot_id: 5
+    product_sku: SKU-DL01
+    blog_id: 12  (Shop Quận 1)
+    blog_name_cache: "Thế Giới Sữa - Quận 1"
+    min_qty: 50
+    max_qty: 200
+    is_active: 1
+
+
+────────────────────────────────────────────────────────────────────────────────
+C3. wp_global_purchase_policy — Chính sách mua hàng
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Rule giá, CK, tặng, combo... cho lô mua hoặc dùng độc lập.
+       1 chính sách phục vụ NHIỀU phiếu mua (không phải 1:1).
+       Có thể CLONE từ chính sách cũ để tạo nhanh.
+       Chính sách = GỢI Ý. Phiếu mua = SỰ THẬT (có thể sửa trên phiếu).
+
+  purchase_policy_id             BIGINT PK AUTO_INCREMENT
+  purchase_policy_code           VARCHAR(100)                -- Mã chính sách
+  purchase_policy_title          TEXT                        -- Tên (VD: "Mua sữa Vinamilk T2/2026")
+  purchase_policy_description    TEXT                        -- Mô tả
+  contract_id                    BIGINT                      -- Thuộc hợp đồng nào (nullable)
+  lot_id                         BIGINT                      -- 🆕🆕 Thuộc lô mua nào (nullable)
+  ledger_person_id               BIGINT                      -- NCC (query nhanh)
+  ledger_person_blog_id          BIGINT                      -- Blog chứa NCC
+  purchase_policy_type           TINYINT                     -- 1=mua thường, 2=mua KM, 3=mua combo
+  purchase_policy_start_date     BIGINT                      -- Timestamp bắt đầu
+  purchase_policy_end_date       BIGINT                      -- Timestamp kết thúc
+  apply_to_blog_ids              JSON                        -- Áp cho shop nào [1,5,10]
+  apply_to_org_level             JSON                        -- Áp theo cấp tổ chức {"level":"branch","id":3}
+  policy_is_template             TINYINT DEFAULT 0           -- 1=template tái sử dụng
+  policy_parent_id               BIGINT                      -- Clone từ chính sách nào
+  policy_total_budget            DECIMAL(15,3)               -- Ngân sách dự kiến
+  policy_accumulate_target       DECIMAL(15,3)               -- Mục tiêu tích lũy mua cả năm
+  policy_accumulate_current      DECIMAL(15,3) DEFAULT 0     -- Đã mua tích lũy
+  purchase_policy_status         TINYINT                     -- 0=draft, 1=active, 2=expired, 3=cancelled
+  purchase_policy_meta           JSON                        -- Mở rộng
+  source_blog_id                 BIGINT                      -- Tạo từ node nào
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  QUAN HỆ:
+    1 NCC → N hợp đồng → 1 lô mua (1:1) → 1 chính sách (gắn vào lô)
+    Hoặc: chính sách độc lập (contract_id = NULL, lot_id = NULL)
+    Hoặc: chính sách gắn HĐ nhưng không gắn lô (lot_id = NULL)
+
+  NGUYÊN TẮC:
+    - CS đang draft, chưa có phiếu bám vào → SỬA thoải mái
+    - CS đã có phiếu mua bám vào → KHÔNG SỬA → Clone mới
+    - 1 CS → nhiều phiếu mua (không phải 1:1)
+    - Chính sách = GỢI Ý, nhân viên sửa giá/SL trên phiếu thoải mái
+
+  CÁCH DÙNG TEMPLATE:
+    1. Tạo chính sách gốc, set policy_is_template = 1
+    2. Lần mua mới: Clone → tạo bản mới với policy_parent_id = id gốc
+    3. Sửa nhẹ nếu cần → Dùng luôn
+
+
+────────────────────────────────────────────────────────────────────────────────
+C4. wp_global_purchase_policy_item — Dòng chi tiết trong chính sách mua
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Mỗi dòng = 1 quy tắc cụ thể trong chính sách.
+       Dùng JSON để linh hoạt: combo, bậc thang, tặng phức tạp đều xử lý được.
+       Thời gian item kế thừa từ CS cha (trường hợp hiếm mới cần riêng).
+
+  pp_item_id                     BIGINT PK AUTO_INCREMENT
+  purchase_policy_id             BIGINT FK                   -- Thuộc chính sách nào
+  pp_item_code                   VARCHAR(100)                -- Mã dòng
+  pp_item_title                  TEXT                        -- Tên dễ hiểu
+  pp_item_type                   TINYINT                     -- Loại (xem bảng mã bên dưới)
+  product_skus                   JSON                        -- SP chính (xem ví dụ bên dưới)
+  gift_skus                      JSON                        -- SP tặng
+  discount_rules                 JSON                        -- CK bậc thang
+  tax_percent                    DECIMAL(15,3)               -- % thuế
+  payment_terms                  JSON                        -- Điều kiện thanh toán
+  pp_item_conditions             JSON                        -- Điều kiện khác (mở rộng)
+  pp_item_priority               INT                         -- Thứ tự ưu tiên
+  pp_item_status                 TINYINT                     -- 0=draft, 1=active
+  pp_item_start_time             BIGINT                      -- Timestamp bắt đầu (thường NULL, kế thừa CS cha)
+  pp_item_end_time               BIGINT                      -- Timestamp kết thúc (thường NULL, kế thừa CS cha)
+  pp_item_meta                   JSON                        -- Mở rộng
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  BẢNG MÃ pp_item_type:
+    1 = Giá mua cố định                → Hiện trên phiếu mua, cho sửa
+    2 = Chiết khấu %                   → Hiện trên phiếu mua, cho sửa %
+    3 = Chiết khấu tiền cố định        → Hiện trên phiếu mua, cho sửa
+    4 = Hàng tặng                      → Thêm dòng tặng, cho xóa/sửa SL
+    5 = Combo (mua A+B tặng C)         → Thêm dòng tặng, cho xóa/sửa
+    6 = Thanh toán sớm                 → KHÔNG hiện trên phiếu, áp lúc TT công nợ
+    7 = Tích lũy cuối kỳ (volume rebate) → KHÔNG hiện trên phiếu, quyết toán cuối kỳ
+    8 = Đặc biệt (toàn bộ logic JSON) → KHÔNG hiện trên phiếu
+
+  VÍ DỤ product_skus (type=1, giá mua):
+    [{"sku": "SKU001", "qty_min": 1, "price": 180000}]
+
+  VÍ DỤ product_skus + gift_skus (type=5, combo):
+    product_skus: [
+      {"sku": "SUA_A_001", "qty_min": 100, "price": 180000},
+      {"sku": "SUA_B_002", "qty_min": 50, "price": 95000}
+    ]
+    gift_skus: [
+      {"sku": "SUA_C_003", "qty": 10}
+    ]
+
+  VÍ DỤ discount_rules (type=2, CK bậc thang):
+    [
+      {"from": 100, "to": 499, "percent": 3},
+      {"from": 500, "to": 999, "percent": 5},
+      {"from": 1000, "percent": 8}
+    ]
+
+  VÍ DỤ payment_terms (type=6, TT sớm):
+    {
+      "credit_days": 30,
+      "early_payment": [
+        {"within_days": 15, "extra_discount_percent": 2},
+        {"within_days": 7, "extra_discount_percent": 3}
+      ]
+    }
+
+  VÍ DỤ 1 chính sách mua Vinamilk T2/2026 gồm 4 dòng:
+    Dòng 1 (type=1): SKU001 Dielac giá 180,000đ
+    Dòng 2 (type=2): Mua ≥100 thùng SKU001 → CK 5%
+    Dòng 3 (type=4): Mua 100 SKU001 → tặng 10 SKU003
+    Dòng 4 (type=6): TT trong 15 ngày → CK thêm 2%
+
+
+────────────────────────────────────────────────────────────────────────────────
+C5. wp_global_batch — ⭐ LÔ HÀNG NHẬP (Batch) — BẢNG TRUNG TÂM
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Sinh khi duyệt phiếu mua hàng. Mỗi SKU trong phiếu = 1 batch gốc.
+       HỖ TRỢ ĐỆ QUY CHA-CON (tối đa 2 cấp):
+         - Cấp 0: Batch gốc (từ đợt nhập, hệ thống tự sinh)
+         - Cấp 1: Sub-batch (chia nhỏ theo HSD/size/màu, thủ công hoặc gợi ý)
+       Mã batch tự sinh: [mã_danh_mục]-[SKU]-[YYYYMMDD]-[số_thứ_tự]
+       Người mua có thể CAN THIỆP chia batch (hệ thống gợi ý, người dùng quyết).
+
+  batch_id                       BIGINT PK AUTO_INCREMENT
+  batch_code                     VARCHAR(100)                -- TỰ SINH: SUA-BOT-SKU001-20260213-001
+  product_sku                    VARCHAR(255)                -- SKU sản phẩm (1 batch = 1 SKU)
+  global_product_cat_id          BIGINT                      -- Danh mục SP (để GROUP BY thống kê)
+
+  -- 🆕🆕 LÔ MUA + ĐỆ QUY (24/02) --
+  lot_id                         BIGINT                      -- Thuộc lô mua NCC nào (nullable)
+  parent_batch_id                BIGINT                      -- Batch cha (NULL = batch gốc cấp 0)
+  batch_level                    TINYINT DEFAULT 0           -- 0=gốc, 1=sub-batch
+  split_criteria                 JSON                        -- Tiêu chí chia: {"by":"exp_date","value":"10/2026"}
+                                                             -- hoặc {"by":"size","value":"900g"}
+                                                             -- hoặc {"by":"color","value":"xanh"}
+  is_auto_split                  TINYINT DEFAULT 1           -- 1=hệ thống tự chia, 0=người dùng tự chia
+
+  batch_snapshot                 JSON                        -- BẢN CHỤP TĨNH lúc tạo batch (không thay đổi sau đó)
+  purchase_policy_id             BIGINT                      -- Chính sách mua nào
+  contract_id                    BIGINT                      -- Hợp đồng nào
+  ledger_person_id               BIGINT                      -- NCC
+  source_ledger_id               BIGINT                      -- Phiếu mua hàng gốc (type=9)
+  source_blog_id                 BIGINT                      -- Nhập tại node nào
+
+  -- SỐ LƯỢNG --
+  batch_total_quantity           DECIMAL(15,3)               -- Tổng SL nhập
+  batch_gift_quantity            DECIMAL(15,3) DEFAULT 0     -- SL hàng tặng
+  batch_distributed_quantity     DECIMAL(15,3) DEFAULT 0     -- Đã chuyển xuống shop
+  batch_sold_quantity            DECIMAL(15,3) DEFAULT 0     -- Đã bán cho khách
+  batch_damaged_quantity         DECIMAL(15,3) DEFAULT 0     -- Hủy/hỏng
+  batch_remaining_quantity       DECIMAL(15,3)               -- Còn lại
+
+  -- GIÁ VỐN --
+  batch_total_cost               DECIMAL(15,3)               -- Tổng tiền vốn cả lô (sau CK, thuế)
+  batch_avg_cost_per_unit        DECIMAL(15,3)               -- Giá vốn BQ/đơn vị = total_cost / total_qty
+  batch_suggested_selling_price  DECIMAL(15,3)               -- Giá bán đề xuất
+
+  -- THỜI GIAN --
+  batch_import_date              DATETIME                    -- Ngày nhập kho
+  batch_exp_date                 DATE                        -- HSD (NULL nếu SP ko tracking, cập nhật lúc nhập kho)
+  batch_first_sold_date          DATETIME                    -- Ngày bán SP đầu tiên
+  batch_last_sold_date           DATETIME                    -- Ngày bán SP cuối cùng
+
+  -- PHÂN BỔ & CẤU HÌNH --
+  batch_distribution             JSON                        -- [{"blog_id":5,"qty":100,"sold":30,"damaged":0,"transferred_out":10}]
+  batch_costing_method           TINYINT DEFAULT 1           -- 1=FIFO, 2=BQ gia quyền
+  batch_status                   TINYINT                     -- 0=draft, 1=active, 2=hết hàng, 3=hết HSD, 4=hủy
+  batch_note                     TEXT
+  batch_meta                     JSON                        -- Mở rộng
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  QUY TẮC SINH BATCH:
+    1. Duyệt phiếu mua hàng (local_ledger type=9)
+    2. Hệ thống duyệt TỪNG DÒNG (ledger_item) trong phiếu
+    3. Mỗi dòng (= 1 SKU) = 1 batch GỐC (level=0, parent=NULL)
+    4. Mã batch = [cat_code]-[SKU]-[YYYYMMDD]-[auto_increment]
+    5. Ví dụ phiếu mua 3 SP → sinh 3 batch gốc:
+       SUA-BOT-SKU001-20260213-001   (Dielac Alpha, 100 thùng)
+       SUA-BOT-SKU002-20260213-001   (Dielac Grow, 50 thùng)
+       SUA-NUOC-SKU003-20260213-001  (Vinamilk tươi, 200 thùng)
+
+  🆕🆕 CHIA BATCH (SUB-BATCH) — CẤP 1:
+    Sau khi sinh batch gốc, người mua có thể CHIA NHỎ:
+
+    a) HỆ THỐNG GỢI Ý (is_auto_split=1):
+       SP có tracking HSD → gợi ý chia theo exp_date:
+       "2,000 thùng Dielac có 3 HSD khác nhau, chia thành 3 sub-batch?"
+       ┌──────────────────────────────────────────────────┐
+       │ ☑ Sub-batch 1: 800 thùng, HSD 10/2026           │
+       │ ☑ Sub-batch 2: 700 thùng, HSD 12/2026           │
+       │ ☑ Sub-batch 3: 500 thùng, HSD 02/2027           │
+       │ [+ Thêm] [Gộp] [Chấp nhận gợi ý] [Tự chia]    │
+       └──────────────────────────────────────────────────┘
+
+    b) NGƯỜI DÙNG TỰ CHIA (is_auto_split=0):
+       Chia theo bất kỳ tiêu chí nào: HSD, size, màu, đợt giao...
+       split_criteria: {"by":"size","value":"900g"}
+
+    c) QUY TẮC BẮT BUỘC:
+       SUM(sub-batch.total_qty) = parent_batch.total_qty
+       → Hệ thống validate, không cho lệch
+
+    d) VÍ DỤ CẤU TRÚC:
+       Batch gốc #100 (level=0, parent=NULL, total=2000, lot_id=5)
+         ├── Sub-batch #101 (level=1, parent=100, total=800, exp=10/2026)
+         ├── Sub-batch #102 (level=1, parent=100, total=700, exp=12/2026)
+         └── Sub-batch #103 (level=1, parent=100, total=500, exp=02/2027)
+
+    e) GIỮ TỐI ĐA 2 CẤP:
+       Không tạo sub-sub-batch. Khi rải shop → dùng batch_distribution JSON.
+       Lý do: đệ quy vô hạn phức tạp khi query + thống kê.
+
+  THỐNG KÊ ĐỆ QUY:
+    Theo sub-batch  : sub-batch #101 → bán 200, còn 600
+    Theo batch gốc  : batch #100 = SUM(sub-batches) = bán 500, còn 1500
+    Theo dòng SP lô : lot_item SKU-DL01 = SUM(batch có lot_id & sku) = nhập 3500, bán 800
+    Theo lô mua     : lot VNM-LOT-001 = SUM(tất cả lot_item) = nhập 5500, bán 2000
+
+  BATCH ÁP DỤNG CHO CẢ 2 LOẠI SP:
+    - SP có tracking HSD: lot gắn batch_id (batch lá) → bán quét lot → biết batch
+    - SP không tracking: ledger_item gắn batch_id (batch lá) → bán hệ thống tự FIFO
+
+  FIFO KHI BÁN SP KHÔNG TRACKING:
+    1. Tìm batch LÁ (leaf: không có con) ACTIVE có:
+       - product_sku = SKU đang bán
+       - batch_distribution chứa blog_id của shop đang bán (và còn SL tại shop đó)
+       - Sắp theo batch_import_date ASC (batch cũ nhất trước)
+    2. Trừ batch lá cũ nhất trước
+    3. Nếu hết → trừ tiếp batch lá kế tiếp
+    4. Cập nhật: batch.batch_sold_quantity + batch cha nếu có
+    5. Ghi vào ledger_item.batch_cost_breakdown
+
+  CÔNG THỨC SỐ LƯỢNG:
+    batch_remaining_quantity = batch_total_quantity - batch_sold_quantity - batch_damaged_quantity
+    Batch cha: remaining = SUM(sub-batch.remaining) (hoặc tự tính nếu không có sub)
+
+    Lưu ý: batch_distributed_quantity KHÔNG trừ vào remaining (chỉ đổi vị trí)
+
+  CÔNG THỨC GIÁ VỐN:
+    batch_total_cost        = tổng tiền mua (sau CK + thuế)
+    batch_avg_cost_per_unit = batch_total_cost / batch_total_quantity
+    Sub-batch kế thừa avg_cost từ batch cha (cùng giá mua)
+
+  CÔNG THỨC KẾ TOÁN:
+    WAC (gia quyền)   = SUM(remaining × avg_cost) / SUM(remaining)  (batch lá còn tồn)
+    Vòng quay tồn kho = COGS / Tồn kho BQ
+    Tốc độ bán/ngày   = sold / (NOW - import_date)
+    Biên lợi nhuận     = (Giá bán BQ - avg_cost) / Giá bán BQ × 100%
+
+  VÍ DỤ batch_snapshot (BẢN CHỤP TĨNH — ghi lúc tạo batch, KHÔNG BAO GIỜ thay đổi):
+    {
+      "policy_code": "CS-VNM-202602",
+      "policy_title": "Mua sữa Vinamilk T2/2026",
+      "supplier_name": "Vinamilk",
+      "supplier_code": "NCC-VNM",
+      "ledger_code": "PM-2026-0213-001",
+      "original_price": 180000,
+      "discount_percent": 5,
+      "tax_percent": 8,
+      "final_unit_price": 184680,
+      "gift_info": {"sku": "SKU003", "qty": 10, "reason": "Mua 100 tặng 10"},
+      "lot_code": "VNM-LOT-2026-Q1",
+      "contract_code": "HD-VNM-2026-001"
+    }
+    Mục đích: Khi NCC đổi giá / sửa HĐ, batch cũ vẫn giữ nguyên thông tin gốc.
+    Dùng cho: báo cáo lịch sử, đối chiếu kiểm toán, trace nguồn gốc.
+
+  QUY TẮC batch_exp_date KHI CHIA SUB-BATCH:
+    - Batch gốc CÓ sub-batch   → batch_exp_date = NULL (HSD nằm ở từng sub)
+    - Batch gốc KHÔNG chia      → batch_exp_date = HSD thực tế (hoặc NULL nếu SP ko tracking)
+    - Sub-batch                  → batch_exp_date = HSD cụ thể của sub đó
+    - FIFO ưu tiên: sub-batch có exp_date SỚM NHẤT bán trước
+    - Khi tất cả sub-batch đã gán exp_date → hệ thống KHÔNG cần exp_date ở batch cha
+
+  GỘP SUB-BATCH (nút [Gộp] trên UI):
+    - Gộp = xóa sub-batch, trả SL về batch cha, batch cha thành batch lá
+    - CHỈ gộp được nếu sub-batch CHƯA có giao dịch nào:
+        • batch_sold_quantity = 0
+        • batch_distributed_quantity = 0
+        • batch_damaged_quantity = 0
+        • Không có lot B2 nào gắn batch_id = sub-batch này
+    - Nếu đã bán / đã rải shop / đã gắn lot → KHÔNG cho gộp → hiện cảnh báo
+    - Sau khi gộp: batch cha.batch_level vẫn = 0, parent_batch_id vẫn = NULL
+    - Phase 1: hỗ trợ gộp đơn giản (sub chưa có giao dịch)
+    - Phase 2 (tương lai): gộp phức tạp (chuyển lot B2, tính lại SL đã bán...)
+
+
+────────────────────────────────────────────────────────────────────────────────
+C6. wp_global_batch_movement — Lịch sử di chuyển batch
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Ghi lại batch đi đâu, từ shop nào đến shop nào, khi nào.
+       Ghi theo batch LÁ (leaf batch — batch thực tế rải đi shop).
+       ⚠️ v7: Bảng này nay được AUTO-POPULATE bởi record_batch_movements()
+       khi approve_export() và approve_import() (class-tgs-transfer-ajax.php).
+       Trước v7: bảng luôn rỗng (không có code nào ghi vào).
+
+  movement_id                    BIGINT PK AUTO_INCREMENT
+  batch_id                       BIGINT                      -- Batch lá nào
+  from_blog_id                   BIGINT                      -- Từ shop nào
+  to_blog_id                     BIGINT                      -- Đến shop nào
+  quantity                       DECIMAL(15,3)               -- SL di chuyển
+  movement_type                  TINYINT                     -- 1=điều chuyển, 2=trả lại, 3=hủy
+  source_ledger_id               BIGINT                      -- Phiếu xuất/nhập liên quan
+  source_ledger_blog_id          BIGINT                      -- Blog chứa phiếu
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+
+────────────────────────────────────────────────────────────────────────────────
+C7. wp_global_supplier_payment — Công nợ NCC
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Theo dõi thanh toán cho NCC. Kế toán dùng quản lý dòng tiền.
+       Công nợ tính THEO TỪNG ĐỢT NHẬP (mỗi phiếu mua = 1 bản ghi payment).
+       Có thể nhóm theo lô để xem tổng nợ cả lô.
+
+  payment_id                     BIGINT PK AUTO_INCREMENT
+  payment_code                   VARCHAR(100)                -- Mã phiếu TT
+  contract_id                    BIGINT                      -- Hợp đồng nào
+  lot_id                         BIGINT                      -- 🆕🆕 Thuộc lô mua nào (để nhóm công nợ theo lô)
+  purchase_policy_id             BIGINT                      -- Chính sách nào
+  source_ledger_id               BIGINT                      -- Phiếu mua hàng gốc (local_ledger type=9)
+  source_ledger_blog_id          BIGINT                      -- Blog chứa phiếu mua
+  ledger_person_id               BIGINT                      -- NCC
+  ledger_person_blog_id          BIGINT                      -- Blog chứa NCC
+  batch_ids                      JSON                        -- TT cho batch nào [1,2,3]
+  payment_total_amount           DECIMAL(15,3)               -- Tổng tiền phải trả (đợt này)
+  payment_paid_amount            DECIMAL(15,3) DEFAULT 0     -- Đã trả
+  payment_remaining              DECIMAL(15,3)               -- Còn nợ
+  payment_due_date               DATE                        -- Hạn thanh toán
+  payment_status                 TINYINT                     -- 0=chưa TT, 1=1 phần, 2=đủ, 3=quá hạn
+  early_payment_discount         DECIMAL(15,3) DEFAULT 0     -- CK thanh toán sớm
+  payment_history                JSON                        -- Lịch sử TT
+  payment_meta                   JSON
+  source_blog_id                 BIGINT
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  THỐNG KÊ CÔNG NỢ:
+    Theo đợt nhập: WHERE source_ledger_id = X
+    Theo lô mua:   WHERE lot_id = X → SUM(remaining) = tổng nợ cả lô
+    Theo NCC:       WHERE ledger_person_id = X
+    Theo hợp đồng:  WHERE contract_id = X
+
+  VÍ DỤ payment_history:
+  [
+    {"date": "2026-02-10", "amount": 50000000, "method": "bank", "note": "Đợt 1"},
+    {"date": "2026-03-01", "amount": 30000000, "method": "bank", "note": "Đợt 2"}
+  ]
+
+
+────────────────────────────────────────────────────────────────────────────────
+C8. wp_global_selling_policy — Chính sách bán ra
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Áp xuống shop, nhân viên KHÔNG CẦN NHỚ. Hệ thống tự áp giá + KM.
+       Chính sách từ cấp trên có thể ốp xuống cấp dưới.
+
+  selling_policy_id              BIGINT PK AUTO_INCREMENT
+  selling_policy_code            VARCHAR(100)
+  selling_policy_title           TEXT                        -- VD: "KM Tết 2026 - Mua 2 tặng 1"
+  selling_policy_type            TINYINT                     -- 1=giảm giá, 2=tặng SP, 3=combo, 4=theo batch, 5=đặc biệt
+  selling_rules                  JSON                        -- Toàn bộ rule bán (xem ví dụ)
+  product_skus                   JSON                        -- SKU áp dụng ["SKU001","SKU002"]
+  apply_to_blog_ids              JSON                        -- Shop nào [1,5,10]
+  apply_to_org_level             JSON                        -- Cấp tổ chức {"level":"region","name":"mien_bac"}
+  apply_to_batch_ids             JSON                        -- Batch nào [101,102]
+  auto_apply                     TINYINT DEFAULT 1           -- 1=TỰ ĐỘNG, nhân viên ko cần chọn
+  selling_policy_priority        INT                         -- Ưu tiên (số nhỏ = ưu tiên cao)
+  selling_policy_parent_id       BIGINT                      -- Kế thừa từ cấp trên
+  selling_policy_start_date      BIGINT                      -- Timestamp bắt đầu
+  selling_policy_end_date        BIGINT                      -- Timestamp kết thúc
+  selling_policy_status          TINYINT                     -- 0=draft, 1=active, 2=expired
+  selling_policy_meta            JSON
+  source_blog_id                 BIGINT
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  VÍ DỤ selling_rules:
+  [
+    {
+      "type": "fixed_price",
+      "sku": "SKU001",
+      "price": 250000
+    },
+    {
+      "type": "buy_x_get_y",
+      "buy": {"sku": "SKU001", "qty": 3},
+      "get": {"sku": "SKU001", "qty": 1, "discount_percent": 100}
+    },
+    {
+      "type": "combo",
+      "items": [{"sku": "SKU001", "qty": 2}, {"sku": "SKU002", "qty": 1}],
+      "combo_price": 500000
+    }
+  ]
+
+  CÁCH HỆ THỐNG ÁP DỤNG KHI BÁN HÀNG:
+    1. Nhân viên quét SP (sku) + shop (blog_id)
+    2. Hệ thống tìm tất cả selling_policy có:
+       - product_skus chứa SKU đó
+       - apply_to_blog_ids chứa blog_id đó (hoặc org_level phù hợp)
+       - status = 1 (active)
+       - start_date ≤ now ≤ end_date
+       - auto_apply = 1
+    3. Sắp theo selling_policy_priority ASC
+    4. Áp từng rule trong selling_rules
+    5. Hiển thị giá cuối cùng → Nhân viên chỉ thu tiền
+
+  GHI CHÚ VỀ selling_policy_items:
+    - Code hiện tại (class-tgs-database.php) CÓ bảng wp_global_selling_policy_items
+    - Design doc dùng JSON selling_rules bên trong C8 thay vì tách bảng riêng
+    - Lý do: Bên BÁN đơn giản hơn bên MUA, JSON đủ linh hoạt
+    - Nếu sau này rule bán phức tạp (>20 dòng/policy, cần query từng dòng):
+      → Tách ra C9. wp_global_selling_policy_items (tương tự C4 bên mua)
+      → Lúc đó tổng sẽ thành 17 bảng
+    - Hiện tại: GIỮ JSON, KHÔNG tách → 16 bảng là đủ
+
+
+────────────────────────────────────────────────────────────────────────────────
+C9. wp_global_reorder_suggestion — Đề xuất mua/chuyển kho tự động
+────────────────────────────────────────────────────────────────────────────────
+Mô tả: Khi quét tồn kho, nếu shop nào có stock < min_qty (C2c) → tạo đề xuất.
+       Hệ thống thông minh: nếu shop khác dư hàng (stock > max_qty) cùng SKU
+       → đề xuất CHUYỂN KHO thay vì mua mới.
+       🆕 v9c (07/03/2026) — Mới hoàn toàn.
+       File: class-purchase-auto-reorder.php
+
+  suggestion_id                  BIGINT PK AUTO_INCREMENT
+  blog_id                        BIGINT NOT NULL             -- Shop cần hàng
+  blog_name_cache                VARCHAR(255)                -- Tên shop (cache)
+  product_sku                    VARCHAR(255) NOT NULL       -- SKU sản phẩm
+  lot_item_id                    BIGINT                      -- Liên kết C2b lot_item
+  current_stock                  DECIMAL(15,3)               -- Tồn kho thực tế tại thời điểm scan
+  min_qty                        DECIMAL(15,3)               -- Ngưỡng min (từ C2c)
+  max_qty                        DECIMAL(15,3)               -- Ngưỡng max (từ C2c)
+  deficit_qty                    DECIMAL(15,3)               -- = min_qty - current_stock
+  suggested_action               TINYINT DEFAULT 1           -- 1=mua thêm, 2=chuyển kho
+  source_blog_id                 BIGINT                      -- Shop nguồn nếu transfer
+  source_blog_name_cache         VARCHAR(255)                -- Tên shop nguồn
+  source_surplus                 DECIMAL(15,3)               -- Lượng dư tại shop nguồn
+  status                         TINYINT DEFAULT 0           -- 0=pending, 1=approved, 2=rejected, 3=completed
+  linked_ledger_id               BIGINT                      -- Phiếu được tạo từ đề xuất này
+  linked_ledger_blog_id          BIGINT                      -- Blog chứa phiếu
+  note                           TEXT
+  scan_batch_id                  VARCHAR(50)                 -- Mã đợt quét (nhóm cùng 1 lần scan)
+  user_id                        BIGINT
+  is_deleted                     TINYINT
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  LOGIC QUÉT (scan_and_generate):
+    1. Lấy tất cả C2c config (is_active=1, min_qty>0)
+    2. Tính tồn kho thực tế từ batch_distribution (leaf batches)
+       Net stock = qty - sold - damaged - transferred_out
+    3. Nếu stock < min_qty → deficit = min_qty - stock
+    4. Tìm shop khác có stock > max_qty cùng SKU → đề xuất transfer
+       Nếu không tìm được → đề xuất purchase
+    5. Soft-delete đề xuất pending cũ → INSERT mới
+
+  SUGGESTED_ACTION:
+    1 = Mua thêm (purchase) — không có shop nào dư, phải nhập hàng mới
+    2 = Chuyển kho (transfer) — có shop dư hàng, chuyển nội bộ tiết kiệm hơn
+
+  STATUS:
+    0 = Chờ xử lý (pending) — vừa scan xong
+    1 = Đã duyệt (approved) — quản lý đồng ý
+    2 = Từ chối (rejected) — không cần thiết
+    3 = Hoàn thành (completed) — đã tạo phiếu mua/chuyển xong
+
+  AJAX ENDPOINTS:
+    tgs_purchase_reorder_scan     → Quét & tạo đề xuất
+    tgs_purchase_reorder_list     → Danh sách đề xuất (phân trang, filter)
+    tgs_purchase_reorder_action   → Duyệt/từ chối/hoàn thành
+    tgs_purchase_reorder_summary  → Thống kê KPI cho dashboard
+
+
+================================================================================
+PHẦN D — SƠ ĐỒ QUAN HỆ TỔNG THỂ (cập nhật 26/02)
+================================================================================
+
+  NHÁNH 1: NCC → HỢP ĐỒNG ↔ LÔ MUA (1:1) → DÒNG SP → CHÍNH SÁCH → PHIẾU MUA → BATCH
+  local_ledger_person (A2, type=1 NCC)
+    │
+    ▼
+  supplier_contract (C1) — khung pháp lý
+    │ 1 NCC = N hợp đồng
+    │ Tạo HĐ → TỰ SINH lô mua (1:1)
+    ▼
+  🆕 purchase_lot (C2) — cam kết mua lô lớn (tự sinh từ HĐ)
+    │ 1 HĐ ↔ 1 lô mua (1:1, UNIQUE contract_id)
+    │
+    ├──→ 🆕 purchase_lot_item (C2b) — N dòng SP trong lô (mỗi SKU 1 dòng)
+    │       └──→ 🆕 lot_item_shop_config (C2c) — min/max tồn kho per-shop per-SKU
+    │
+    ├──→ purchase_policy (C3) — rule giá/CK/tặng cho lô
+    │       └── purchase_policy_item (C4) — N dòng rule
+    │
+    ├──→ Phiếu mua đợt 1 (local_ledger type=9, lot_id=X)
+    │       │ Duyệt → sinh batch gốc (level=0)
+    │       │          → có thể chia sub-batch (level=1)
+    │       ▼
+    │     ⭐ wp_global_batch (C5) ← TRUNG TÂM
+    │       │ lot_id = X, parent_batch_id = NULL (gốc) hoặc = cha (sub)
+    │       └──→ supplier_payment (C7) ← công nợ đợt 1
+    │
+    ├──→ Phiếu mua đợt 2 → batch(es) → công nợ đợt 2
+    │
+    └──→ Phiếu mua đợt 3 → ...
+
+  NHÁNH 2: MUA LẺ / GẤP (không cần HĐ + lô)
+  Tạo phiếu mua (lot_id=NULL, contract_id=NULL, policy_id=NULL)
+    │ Nhập tay giá, SL
+    │ Duyệt → sinh batch gốc
+    ▼
+  ⭐ wp_global_batch (C5)
+
+  NHÁNH 3: TỪ BATCH TỎA RA
+  ⭐ wp_global_batch (C5)
+    │
+    ├──→ Sub-batch (parent_batch_id) ← chia nhỏ theo HSD/size/màu
+    │
+    ├──→ batch_movement (C6) ← di chuyển giữa shop (batch lá)
+    │
+    ├──→ wp_global_product_lots (B2) ← lot.batch_id (SP tracking, batch lá)
+    │
+    ├──→ local_ledger_item (A4) ← item.batch_id (batch lá)
+    │                              item.batch_cost_breakdown (FIFO)
+    │
+    ├──→ supplier_payment (C7) ← công nợ theo đợt nhập
+    │
+    └──→ selling_policy (C8) ← áp theo batch → tự động bán
+
+  NHÁNH 4: THỐNG KÊ THEO CẤP
+  Theo sub-batch  : 1 sub-batch cụ thể (VD: HSD 10/2026)
+  Theo batch gốc  : SUM(sub-batches) — 1 đợt nhập
+  Theo dòng SP lô : SUM(batch có lot_id & sku) — 1 SKU trong lô
+  Theo shop       : 🆕 lot_item_shop_config (C2c) — min/max per-shop per-SKU
+  Theo lô mua     : SUM(tất cả lot_item) — toàn lô cam kết
+  Theo hợp đồng   : = lô mua duy nhất của HĐ (1:1) — toàn HĐ
+  Theo NCC        : SUM(tất cả HĐ có ledger_person_id) — toàn NCC
+
+
+================================================================================
+PHẦN E — LUỒNG HOẠT ĐỘNG TỔNG THỂ (cập nhật 26/02)
+================================================================================
+
+  Bước 1: Tạo hợp đồng NCC (tùy chọn) → HỆ THỐNG TỰ SINH LÔ
+          → Tạo bản ghi supplier_contract (C1)
+          → Hệ thống TỰ ĐỘNG tạo purchase_lot (C2) kèm theo:
+            • lot_code = contract_code + "-LOT" (VD: HD-VNM-2026-001-LOT)
+            • lot_title = "Lô mua — " + contract_title
+            • lot_status = 0 (draft)
+            • contract_id, ledger_person_id, ledger_person_blog_id kế thừa từ HĐ
+            • lot_start_date, lot_end_date kế thừa từ HĐ
+          → Redirect user sang trang chi tiết lô → thêm sản phẩm
+
+  Bước 2: Thêm sản phẩm vào lô
+          → Thêm N dòng lot_item (C2b): Dielac 5,000, Grow 3,000, sữa tươi 2,000
+          → Hệ thống auto tính lot_total_committed_value, lot_total_items
+          → Cập nhật thông tin lô nếu cần (mô tả, reorder...)
+
+  Bước 3: Tạo chính sách mua (tùy chọn)
+          → Tạo purchase_policy (C3) — gắn vào lô (hoặc độc lập)
+          → Thêm N dòng purchase_policy_item (C4)
+          → Hoặc clone từ template cũ
+
+  Bước 4: Tạo phiếu mua hàng (ĐỢT 1)
+          → local_ledger type=9 (A3), lot_id = lô nào
+          → Chọn lô → hiện danh sách lot_item (C2b) → chọn SKU cần nhập đợt này
+          → Hệ thống auto fill giá, CK, tặng từ lot_item + CS
+          → Hoặc bỏ qua lô/CS → nhập tay (mua lẻ/gấp)
+          → Nhân viên sửa trên phiếu thoải mái (CS chỉ là gợi ý)
+
+  Bước 5: Duyệt phiếu → Sinh BATCH
+          → Mỗi SKU = 1 batch gốc (level=0)
+          → Hệ thống GỢI Ý chia sub-batch:
+            "SP này có 3 HSD khác nhau, chia 3 sub-batch?"
+          → Người mua chấp nhận / tự chia / bỏ qua
+          → Tạo bản ghi supplier_payment (C7) — công nợ đợt này
+          → Cập nhật lot_item (C2b): imported_qty += SL phiếu (theo từng SKU)
+
+  Bước 6: Nhập kho
+          → local_ledger type=1 (A3)
+          → SP tracking HSD: sinh lot (B2) + gắn lot.batch_id (batch lá)
+          → SP ko tracking: cộng quantity_no_tracking + gắn item.batch_id
+          → Cập nhật batch_exp_date (từ lot HSD sớm nhất)
+
+  Bước 7: Gợi ý nhập tiếp (tự động, chỉ khi lot.auto_reorder_enabled = 1)
+          → Kiểm tra TỪNG lot_item (C2b):
+            SUM(batch_lá.remaining WHERE lot_id=X AND sku=S) ≤ threshold% × lot_item.committed_qty
+            VD: Dielac committed=5,000, remaining=900 → 18% < 20% → NHẮC
+          → 🆕 Kiểm tra TỪNG SHOP (C2c lot_item_shop_config):
+            Tồn tại shop = SUM(batch_lá.distribution[blog_id].qty - sold)
+            Nếu < config.min_qty → "Shop Quận 1: Dielac tồn 15/min=50. Cần bổ sung 35."
+            Nếu > config.max_qty → "Shop Quận 1: Dielac tồn 120/max=100. Cần điều chuyển 20."
+          → Thông báo dạng:
+            "Dielac (SKU-DL01): tồn còn 900/5,000 (18%). Chưa nhập: 1,500. Tạo phiếu mua?"
+          → Khi đạt mốc tích lũy (policy_item type=7):
+            "Dielac: đã nhập 4,500/5,000 — đạt CK bậc 3 (8%). Gợi ý đòi quyền lợi NCC."
+          → Gửi cho: lot.reorder_notify_roles ["admin","purchaser"]
+          → Quay lại Bước 4 cho đợt tiếp theo
+
+  Bước 8: Điều chuyển xuống shop
+          → transfer_ledger (A5) + batch_movement (C6) — batch lá
+          → batch.batch_distribution cập nhật
+          → batch.batch_distributed_quantity cập nhật
+
+          ⚠️ THU THẬP batch_id KHÁC NHAU THEO LOẠI SP (v7 — 07/03):
+          → SP KHÔNG tracking: batch_id lấy từ ledger_item.batch_id
+            (frontend gửi batch_allocations khi tạo phiếu chuyển kho)
+          → SP CÓ tracking (HSD/lot): batch_id KHÔNG CÓ trên ledger_item
+            → Backend tự resolve: từ ledger_item.list_product_lots
+              → query wp_global_product_lots → lấy batch_id từ lot
+              → nhóm theo batch_id, đếm số lot = quantity
+          → Helper: TGS_Transfer_Ajax::collect_items_with_batch($items)
+          → Sau khi thu thập → gọi on_transfer_export/import_approved()
+          → Đồng thời ghi lịch sử C6 batch_movement (tự động, v7 mới)
+
+  Bước 9: Set chính sách bán
+          → selling_policy (C8) — auto_apply = 1
+          → Có thể áp theo batch, SKU, shop, miền, cấp tổ chức
+
+  Bước 10: Bán hàng
+           → SP tracking: quét lot → biết batch lá → áp giá từ selling_policy
+           → SP ko tracking: FIFO tự trừ batch lá cũ nhất
+           → batch.batch_sold_quantity cập nhật (+ batch cha nếu có)
+           → product.weighted_avg_cost cập nhật
+
+  Bước 11: Dashboard kế toán
+           → Query từ batch data:
+              • Tồn kho / lãi lỗ theo: sub-batch → batch gốc → dòng SP lô → lô → HĐ → NCC
+              • Vòng quay tồn kho theo batch / shop / chi nhánh / miền
+              • Giá vốn BQ gia quyền (WAC)
+              • Biên lợi nhuận
+              • Tốc độ bán (SP/ngày)
+              • Công nợ NCC (theo đợt nhập / theo lô / theo HĐ)
+              • Tiến độ nhập lô: theo từng SKU (lot_item) + tổng lô
+              • Gợi ý quyền lợi NCC theo mốc tích lũy (theo từng SKU)
+
+
+================================================================================
+PHẦN F — GHI CHÚ PHÁT TRIỂN TƯƠNG LAI
+================================================================================
+
+  1. BẢNG SƠ ĐỒ TỔ CHỨC (có thể cần thêm sau):
+     → wp_global_organization
+     → Lưu: Công ty → Miền → Chi nhánh → Tỉnh → Shop
+     → Hiện tại dùng multisite + JSON (apply_to_org_level) là tạm đủ
+
+  2. ĐA TIỀN TỆ (sữa nhập khẩu):
+     → Thêm vào contract_terms hoặc purchase_policy_meta
+     → Không cần thêm bảng
+
+  3. PHÂN BIỆT ĐẶT HÀNG vs NHẬP KHO vs HÓA ĐƠN:
+     → Dùng local_ledger_type + local_ledger_parent_id
+     → type=9 (đặt mua) → type=1 (nhập kho, parent=9)
+     → Thêm trạng thái nếu cần: đặt 1000, nhận 980
+
+  4. EXPORT / IMPORT CHÍNH SÁCH:
+     → purchase_policy + items đều có thể export JSON
+     → Import vào hệ thống khác hoặc tạo version mới
+
+  5. TẤT CẢ CỘT JSON ĐỀU MỞ RỘNG ĐƯỢC:
+     → Thêm field mới vào JSON không cần ALTER TABLE
+     → Tương thích ngược: code cũ bỏ qua field mới
+
+  6. CẢNH BÁO PERFORMANCE (KHI SCALE LỚN):
+     → FIFO query batch LÁ theo product_sku (cột riêng) → NHANH
+     → Đánh INDEX: (product_sku, batch_status, batch_import_date) trên wp_global_batch
+     → Thêm INDEX: (parent_batch_id) cho query đệ quy
+     → Thêm INDEX: (lot_id) cho thống kê theo lô
+     → Thêm INDEX: (lot_id, product_sku) UNIQUE trên C2b lot_item
+     → Thêm INDEX: (contract_id) UNIQUE trên C2 purchase_lot — đảm bảo 1:1 HĐ↔Lô
+     → Thêm INDEX: (lot_item_id, blog_id) UNIQUE trên C2c lot_item_shop_config
+     → batch_distribution (JSON lưu per-shop):
+        Format: [{"blog_id":X, "qty":100, "sold":30, "damaged":0, "transferred_out":10}]
+        Tồn thực tế = qty - sold - damaged - transferred_out
+        Populated tự động khi duyệt phiếu (class TGS_Batch_Distribution)
+        Nếu chậm → tách ra bảng wp_global_batch_shop_allocation
+
+  7. LIÊN KẾT VỚI HỆ THỐNG CŨ:
+     → Các bảng local cũ (A1-A5) KHÔNG CẦN SỬA CẤU TRÚC, chỉ thêm cột mới
+     → Code plugin cũ (tgs_shop_management) vẫn hoạt động bình thường
+     → Plugin mới (mua hàng) là extension, không xung đột
+
+  8. SUB-BATCH VÔ HẠN (KHÔNG KHUYẾN NGHỊ):
+     → Hiện tại giới hạn 2 cấp (gốc + sub-batch)
+     → Nếu cần chia tiếp khi rải shop → dùng batch_distribution JSON
+     → Đệ quy vô hạn phức tạp khi query + thống kê, chưa cần thiết
+
+  9. TẮT SINH BATCH (tương lai):
+     → Thêm cột local_product_batch_enabled TINYINT DEFAULT 1 (ở bảng SP)
+     → 1 = sinh batch (mặc định), 0 = không sinh
+     → Cho SP đơn giản (túi xách, ống hút...) không cần track giá vốn theo lô
+
+
+================================================================================
+PHẦN G — CHANGELOG
+================================================================================
+
+  06/03/2026 (v9) — TÍCH HỢP POS BÁN HÀNG + CHÍNH SÁCH BÁN + FIFO BATCH
+  ─────────────────────────────────────────────────────────────────
+
+  MỤC TIÊU: Rà soát và khép kín luồng BÁN HÀNG từ POS → batch_distribution,
+  đảm bảo dữ liệu batch/tồn kho chính xác khi bán qua POS 650 cửa hàng.
+
+  KIẾN TRÚC 3 PLUGIN BÁN HÀNG:
+
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ Plugin tgs_pos (BizGPT POS Bán hàng)                                  │
+    │   📁 wp-content/plugins/tgs_pos/                                      │
+    │   ├── bizgpt-pos.php              ← Entry point, PWA-ready            │
+    │   ├── functions/ajax/                                                  │
+    │   │   ├── class-tgs-pos-ajax-order.php    ← save_order()              │
+    │   │   ├── class-tgs-pos-ajax-product.php  ← search, barcode scan      │
+    │   │   └── class-tgs-pos-ajax-customer.php ← khách hàng POS            │
+    │   ├── include/class-tmdpos-init.php       ← Bootstrap, enqueue        │
+    │   └── templates/front/                                                │
+    │       ├── pos-view.php            ← Giao diện POS chính (Tailwind)    │
+    │       ├── pos-orders.php          ← Lịch sử đơn hàng                  │
+    │       └── pos-customers.php       ← Quản lý khách hàng                │
+    │                                                                       │
+    │   NONCE: tmd_pos_nonce (POS frontend)                                 │
+    │   AJAX:  tgs_pos_save_order, tgs_pos_search_products,                 │
+    │          tgs_pos_search_by_lot_barcode, tgs_pos_get_product_lots,     │
+    │          tgs_pos_list_orders, tgs_pos_get_order_detail,               │
+    │          tgs_pos_check_promotions, tgs_pos_apply_coupon,              │
+    │          tgs_pos_get_customer_points, ...                             │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ tgs_pos_save_order()
+                                    │ → do_action_ref_array('tgs_shop_create_sale_from_pos', ...)
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ Plugin tgs_shop_management (Core)                                      │
+    │   📁 functions/api/class-tgs-api-sales.php ← TGS_API_Sales            │
+    │                                                                       │
+    │   Hook: tgs_shop_create_sale_from_pos → handle_internal_sale()        │
+    │         → create_sale() (reuse toàn bộ REST API logic)                │
+    │                                                                       │
+    │   LUỒNG:                                                              │
+    │     STEP 1: Tạo phiếu bán hàng (local_ledger type=SALE_ORDER)        │
+    │     STEP 2: Tạo phiếu thu (local_ledger type=RECEIPT)                │
+    │     STEP 3: Tạo phiếu xuất ngầm (local_ledger type=SALE)            │
+    │             → create_export_ledger() → create_export_item()           │
+    │             → SP tracking: find_lots_for_export() → reserve lots      │
+    │             → SP non-tracking: check stock → trừ ngay qty_no_tracking │
+    │     STEP 4: Cập nhật ledger_item_id                                   │
+    │     STEP 5: Đánh dấu đơn đã đóng                                     │
+    │     STEP 6: Auto-approve (POS) — ⭐ ĐIỂM QUAN TRỌNG                  │
+    │             6.1: Duyệt phiếu bán + log                               │
+    │             6.2: Duyệt phiếu xuất + log                              │
+    │             6.2a: Lots → INACTIVE (approve_global_lots_export)         │
+    │             🆕 6.2b: FIFO batch assignment (SP non-tracking)          │
+    │             🆕 6.2b: Resolve batch_id từ lot (SP tracking)            │
+    │             🆕 6.2b: on_export_approved() → batch_distribution.sold   │
+    │             6.3: Duyệt phiếu thu + log                               │
+    └─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    │ tgs_pos_check_promotions()
+                                    │ → tgs_selling_policy_get_applicable_promotions()
+                                    ▼
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │ Plugin tgs_selling_policy (Chính sách bán hàng)                       │
+    │   📁 wp-content/plugins/tgs_selling_policy/                           │
+    │   ├── tgs-selling-policy.php      ← Entry, routes, sidebar            │
+    │   ├── includes/                                                       │
+    │   │   ├── class-selling-policy-ajax.php   ← CRUD chính sách (admin)   │
+    │   │   └── class-selling-policy-engine.php ← ⭐ Runtime engine (POS)   │
+    │   └── admin-views/                                                    │
+    │       ├── dashboard.php, list.php, add.php, detail.php                │
+    │                                                                       │
+    │   NONCE: tgs_selling_nonce (admin CRUD)                               │
+    │   BẢNG:  wp_global_selling_policy (C8)                                │
+    │          wp_global_selling_policy_items (index bảng phụ)              │
+    │                                                                       │
+    │   GLOBAL HELPERS (gọi từ tgs_pos):                                    │
+    │     tgs_selling_policy_get_applicable_promotions($context)            │
+    │       → Auto-apply promotions cho cart (loại trừ voucher type 11)     │
+    │     tgs_selling_policy_apply_coupon($code, $context)                  │
+    │       → Áp mã coupon/voucher (bao gồm type 11)                       │
+    │     tgs_selling_policy_get_rewards_for_customer($id, $total, $items)  │
+    │       → Lấy quà đổi điểm (type 8 loyalty)                            │
+    │                                                                       │
+    │   ENGINE POLICY TYPES:                                                │
+    │     1  = Giảm giá cố định (fixed_price)                              │
+    │     2  = Mua X tặng Y (buy_x_get_y)                                  │
+    │     3  = Combo (combo giá)                                            │
+    │     4  = Batch price (giá theo batch cụ thể)                          │
+    │     6  = Giảm giá % (percent_discount)                               │
+    │     7  = Khai trương (grand_opening)                                  │
+    │     8  = VIP Loyalty (tích điểm, đổi quà)                            │
+    │     9  = Flash Sale                                                   │
+    │     10 = Threshold (mua đủ X đồng → giảm)                            │
+    │     11 = Voucher (nhập mã coupon)                                     │
+    │     12 = Sinh nhật                                                    │
+    │                                                                       │
+    │   SO SÁNH VỚI DESIGN DOC C8:                                         │
+    │     Design doc C8: selling_rules = JSON (đủ cho bán đơn giản)         │
+    │     Thực tế: ĐÚNG — dùng selling_rules JSON + bảng phụ items (index) │
+    │     Bảng wp_global_selling_policy_items dùng để INDEX nhanh:          │
+    │       item_type = 'sku' | 'batch', item_value = giá trị              │
+    │     → Sync khi save policy, KHÔNG thay thế selling_rules JSON         │
+    │     → Phù hợp thiết kế (C8 ghi chú: "nếu phức tạp → tách bảng")    │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+  BUG ĐÃ SỬA (class-tgs-api-sales.php):
+
+    VẤN ĐỀ: POS auto-approve (Step 6) gọi TRỰC TIẾP update status,
+    KHÔNG gọi handle_post_approve() như luồng duyệt phiếu thủ công.
+    Dẫn đến:
+      ❌ batch_distribution.sold KHÔNG cập nhật
+      ❌ batch_sold_quantity KHÔNG tăng
+      ❌ SP non-tracking: batch_id = NULL (không biết bán từ batch nào)
+      ❌ SP tracking: batch_id = NULL (lot → batch chưa resolve)
+      ❌ batch_cost_breakdown KHÔNG có (không tính được giá vốn FIFO)
+      → Bán bao nhiêu đơn, batch vẫn nguyên, cảnh báo tồn kho vô nghĩa.
+
+    GIẢI PHÁP — Step 6.2b mới (trong create_sale, sau approve lots):
+      1. SP TRACKING: Resolve batch_id từ lot đầu tiên trong list_product_lots
+         → Query B2.batch_id → gán vào ledger_item.batch_id
+      2. SP NON-TRACKING: FIFO tìm batch lá cũ nhất có hàng tại shop
+         → fifo_assign_batch() → gán batch_id + batch_cost_breakdown
+         → Hỗ trợ chia nhiều batch nếu 1 batch không đủ SL
+      3. Gọi TGS_Batch_Distribution::on_export_approved()
+         → Cập nhật batch_distribution.sold tại shop đang bán
+         → Propagate sold lên batch cha (nếu có)
+
+    METHOD MỚI: fifo_assign_batch($sku, $blog_id, $qty, $item_id, $table)
+      → Private static helper trong TGS_API_Sales
+      → Tìm leaf batches FIFO (batch_import_date ASC)
+      → Parse distribution → tính available tại shop
+      → Gán batch_id chính + ghi batch_cost_breakdown JSON
+      → Fallback: nếu distribution rỗng → dùng batch_remaining_quantity
+
+  SO SÁNH LUỒNG BÁN HÀNG VỚI DESIGN DOC:
+
+    Design (Bước 10):
+      "SP tracking: quét lot → biết batch lá → áp giá từ selling_policy"
+      "SP ko tracking: FIFO tự trừ batch lá cũ nhất"
+      "batch.batch_sold_quantity cập nhật (+ batch cha nếu có)"
+      "product.weighted_avg_cost cập nhật"
+
+    Thực tế (SAU SỬA):
+      ✅ SP tracking: lot barcode → product → tạo phiếu → lot → INACTIVE → batch_id assigned
+      ✅ SP non-tracking: FIFO assign batch → batch_cost_breakdown → distribution.sold
+      ✅ selling_policy: POS gọi engine → auto-apply promotions → gift products → discount
+      ⚠️ weighted_avg_cost: CHƯA cập nhật (WAC chỉ có ý nghĩa khi nhập batch mới,
+         không nhất thiết phải cập nhật khi bán — giá vốn FIFO đã lưu trong breakdown)
+
+  SELLING POLICY SO SÁNH VỚI C8:
+
+    Design doc C8:
+      "Áp xuống shop, nhân viên KHÔNG CẦN NHỚ. Hệ thống tự áp giá + KM."
+      "auto_apply = 1 → TỰ ĐỘNG"
+      "selling_rules JSON chứa toàn bộ rule"
+
+    Thực tế:
+      ✅ ĐÚNG — Engine tự evaluate khi POS gọi check_promotions
+      ✅ ĐÚNG — auto_apply filter trong query_active_policies()
+      ✅ ĐÚNG — selling_rules JSON + 12 loại policy type
+      ✅ MỞ RỘNG — Thêm type 7-12 (khai trương, loyalty, flash sale, threshold,
+                    voucher, birthday) so với design doc ban đầu (type 1-5)
+      ✅ MỞ RỘNG — Bảng wp_global_selling_policy_items dùng làm index
+      ✅ MỞ RỘNG — scope theo sơ đồ tổ chức (apply_to_org_level + hierarchy)
+
+  POS INTEGRATION SO SÁNH:
+
+    Design doc (Bước 9-10):
+      "Set chính sách bán → selling_policy (C8)"
+      "Nhân viên quét SP → hệ thống tìm policy → áp rule → hiển thị giá cuối"
+
+    Thực tế:
+      ✅ POS quét barcode → search_by_lot_barcode (SP tracking) hoặc search_products
+      ✅ POS gọi check_promotions → engine trả promotions + discount
+      ✅ POS gọi apply_coupon → engine validate voucher + trả discount
+      ✅ POS gọi get_customer_points → engine trả quà đổi điểm
+      ✅ POS gộp gift_products + lot_barcodes vào payload
+      ✅ POS gọi hook → tgs_shop_management xử lý tất cả
+      ✅ WooCommerce gateway hỗ trợ (QR payment qua ttck_up_ prefix)
+
+  FILE THAY ĐỔI:
+    - class-tgs-api-sales.php: +Step 6.2b (FIFO + tracking resolve + on_export_approved)
+                               +fifo_assign_batch() method (~80 dòng)
+
+  KHÔNG ẢNH HƯỞNG:
+    - Không thêm bảng mới, không thay đổi cấu trúc bảng
+    - Plugin tgs_pos: KHÔNG SỬA (đã code đúng: gửi payload, nhận result)
+    - Plugin tgs_selling_policy: KHÔNG SỬA (engine + CRUD hoạt động đúng)
+    - class-tgs-batch-distribution.php: KHÔNG SỬA (on_export_approved vẫn đúng)
+
+  TỔNG: vẫn 17 bảng (không thêm bảng)
+
+
+  06/03/2026 (v9b) — FIX DUYỆT THỦ CÔNG KHÔNG CẬP NHẬT BATCH_DISTRIBUTION
+  ─────────────────────────────────────────────────────────────────
+
+  BUG: Khi tạo phiếu bán hàng THỦ CÔNG (không qua POS) rồi duyệt,
+  batch_distribution.sold KHÔNG được cập nhật → trang batch detail hiển thị
+  sai "Đã bán" = 0.
+
+  NGUYÊN NHÂN GỐC:
+    - create_export_item() CHỈ gán batch_id nếu caller truyền vào $item_data['batch_id']
+    - Phiếu thủ công KHÔNG truyền batch_id → ledger_item.batch_id = NULL
+    - handle_post_approve() gọi on_export_approved() đọc batch_id từ items
+    - on_export_approved() skip items có batch_id = 0/NULL (`if ($bid <= 0) continue;`)
+    → Duyệt xong nhưng batch_distribution.sold vẫn = 0
+    → batch_sold_quantity KHÔNG tăng
+
+  SO SÁNH 2 LUỒNG:
+    Luồng POS (ĐÃ ĐÚNG):
+      create_sale() → Step 6.2b → resolve batch_id từ lot (tracking)
+                                → fifo_assign_batch (non-tracking)
+                                → on_export_approved()
+    Luồng thủ công (BỊ LỖI):
+      create_export_item() → batch_id = NULL
+      approve() → handle_post_approve() → on_export_approved() → skip vì batch_id NULL
+
+  GIẢI PHÁP:
+    Thêm Phase C.0 trong handle_post_approve(), TRƯỚC khi gọi on_export_approved():
+    1. SP TRACKING: resolve batch_id từ lot đầu tiên → B2.batch_id
+    2. SP NON-TRACKING: FIFO tìm leaf batch cũ nhất có hàng tại shop
+       → fifo_assign_batch_on_approve() → gán batch_id + batch_cost_breakdown
+    3. SAU ĐÓ mới gọi on_export_approved() → đọc batch_id đã có → cập nhật đúng
+
+  FILE THAY ĐỔI:
+    - class-tgs-ajax-ticket.php:
+      + handle_post_approve(): thêm Phase C.0 trước switch (SALE type 2)
+      + fifo_assign_batch_on_approve(): private static method (~80 dòng)
+        Logic tương đương TGS_API_Sales::fifo_assign_batch()
+
+  KHÔNG ẢNH HƯỞNG:
+    - Luồng POS: KHÔNG thay đổi (vẫn dùng Step 6.2b riêng)
+    - Các loại phiếu khác (nhập kho, hủy, hoàn): KHÔNG ảnh hưởng
+    - class-tgs-batch-distribution.php: KHÔNG SỬA
+    - class-tgs-api-sales.php: KHÔNG SỬA
+
+
+  07/03/2026 (v7) — FIX TRANSFER → DISTRIBUTION CHO SP TRACKING + BATCH MOVEMENT
+  ─────────────────────────────────────────────────────────────────
+  BUG GỐC: Khi chuyển kho SP có tracking (HSD/lot), batch_distribution KHÔNG
+  được cập nhật → trang batch detail không hiện shop đích sau chuyển kho.
+
+  NGUYÊN NHÂN SÂU:
+    - Frontend (ticket-detail-base.js) chỉ gửi batch_allocations cho SP KHÔNG tracking
+    - SP tracking dùng modal quét lot → KHÔNG có batch_allocations trên ledger_item
+    - Hàm save_ticket_base() chỉ set batch_id từ batch_allocations
+    → ledger_item.batch_id = NULL cho SP tracking
+    → approve_export() / approve_import() skip items không có batch_id
+    → batch_distribution KHÔNG BAO GIỜ được cập nhật cho SP tracking
+
+  GIẢI PHÁP — 3 HELPER METHOD MỚI TRONG TGS_Transfer_Ajax:
+
+    1. collect_items_with_batch($items)  [static, ~50 dòng]
+       → SP không tracking: dùng $item->batch_id trực tiếp
+       → SP tracking: parse list_product_lots → query wp_global_product_lots
+         → lấy batch_id từ lot → GROUP BY batch_id → count = quantity
+       → Trả về: [{batch_id, product_sku, quantity}, ...]
+
+    2. record_batch_movements($items_with_batch, $from, $to, $type, ...)  [static, ~30 dòng]
+       → Insert wp_global_batch_movement (C6) cho mỗi batch_id
+       → Gọi tự động trong approve_export() và approve_import()
+       → movement_type: 1=điều chuyển, 2=trả lại
+
+    3. resolve_batch_id_for_item($source_item, $is_tracking)  [static, ~25 dòng]
+       → Dùng trong do_create_import_internal() khi tạo phiếu nhập ở shop đích
+       → SP không tracking: return $item->batch_id
+       → SP tracking: query lot đầu tiên → return lot.batch_id
+
+  THAY ĐỔI LUỒNG:
+    - approve_export(): thay inline loop → collect_items_with_batch() + record_batch_movements()
+    - approve_import(): thay inline loop → collect_items_with_batch() + record_batch_movements()
+    - do_create_import_internal(): batch_id dùng resolve_batch_id_for_item() thay vì $item->batch_id
+
+  SỬA UI batches/detail.php:
+    - Hàm lotStatusBadge(isActive, toBlogId): hiện trạng thái lot theo shop
+      "Trong kho", "Đang ở shop khác" (tím), "Chờ duyệt chuyển", "Đã bán", "Đã hủy"
+    - Thêm cột "Đang ở shop" trong bảng lot (hiện tên shop nơi lot đang ở)
+
+  BACKFILL DỮ LIỆU:
+    - 7 batches sửa distribution: #1, #3, #101, #110, #111, #116, #117
+    - Bảng wp_global_batch_movement (C6) từ 0 rows → populated cho tất cả transfer lịch sử
+
+  FILE THAY ĐỔI:
+    - class-tgs-transfer-ajax.php: +3 methods mới, sửa 3 methods (~2873 dòng sau sửa)
+    - class-tgs-base-import-export.php: create_import_item() thêm batch_id forwarding
+    - batches/detail.php: +lotStatusBadge(), +shopNameFromDist(), +cột "Đang ở shop" (~1528 dòng)
+
+  KHÔNG ẢNH HƯỞNG:
+    - Không thêm bảng mới, không thay đổi cấu trúc bảng
+    - class-tgs-batch-distribution.php: KHÔNG SỬA (on_transfer_*_approved vẫn đúng)
+    - Frontend ticket-detail-base.js: KHÔNG SỬA (đúng design: tracking dùng lot modal)
+    - Tất cả tính năng cũ (lot config, batch split, FIFO...) không bị ảnh hưởng
+
+  TỔNG: vẫn 17 bảng (không thêm bảng)
+
+
+  06/03/2026 (v6) — BỔ SUNG TÀI LIỆU + PHÂN BỔ BATCH THEO SHOP
+  ─────────────────────────────────────────────────────────────────
+  Yêu cầu: Bổ sung tài liệu tham chiếu code, query, data flow cho team dev.
+  Đồng thời bổ sung tính năng "Phân bổ theo shop" trên trang chi tiết batch.
+
+  TÀI LIỆU MỚI (PHẦN H, I, J):
+    + PHẦN H: Cấu trúc code, PHP class, tất cả AJAX endpoints (bảng tham chiếu)
+    + PHẦN I: Cách lưu dữ liệu, batch_distribution lifecycle, query patterns
+    + PHẦN J: Danh sách tính năng đã triển khai + roadmap tương lai
+
+  TÍNH NĂNG MỚI:
+    + Card "Phân bổ theo shop" trên batches/detail.php
+      - AJAX: tgs_purchase_batch_shop_distribution → get_shop_distribution()
+      - Gộp leaf batches, tính stock per-shop, min/max từ C2c, cảnh báo
+    + Helper: get_leaf_batches_for_distribution() trong class-purchase-batch-ajax.php
+
+  FILE THAY ĐỔI:
+    - class-purchase-batch-ajax.php: +1 action, +2 methods (~170 dòng)
+    - batches/detail.php: +1 card HTML, +3 JS functions (~150 dòng)
+
+  KHÔNG ẢNH HƯỞNG:
+    - Tất cả tính năng cũ (lot config, batch distribution, batch suggest...)
+    - Không thêm bảng mới, không thay đổi cấu trúc bảng
+    - Tổng vẫn 17 bảng
+
+
+  27/02/2026 (v4) — THÊM C2c: CẤU HÌNH TỒN KHO MIN/MAX THEO SHOP
+  ─────────────────────────────────────────────────────────────────
+  Yêu cầu: Set min/max tồn kho cho từng shop (blog_id) theo từng SKU trong lô mua.
+  Mục đích: Khi bán/chuyển hàng → hệ thống so sánh tồn tại shop với min/max → cảnh báo.
+  Chuẩn bị cho: batch-aware internal transfer (điều chuyển thông minh dựa trên min/max).
+
+  BẢNG MỚI:
+    + C2c. wp_global_lot_item_shop_config — Cấu hình min/max tồn theo shop
+
+  THAY ĐỔI LOGIC:
+    - Bước 7 (gợi ý nhập tiếp): thêm kiểm tra per-shop min/max từ C2c
+    - Nhánh 4 (thống kê): thêm cấp "Theo shop" từ C2c
+    - Sơ đồ Nhánh 1: C2b → C2c (lot_item → shop_config)
+    - UI: Thêm section "Cấu hình tồn kho theo shop" vào trang chi tiết lô (lots/detail.php)
+
+  KHÔNG ẢNH HƯỞNG:
+    - C1, C2, C2b, C3, C4, C5, C6, C7, C8 — không thay đổi cấu trúc
+    - A1-A5, B1-B2 — không thay đổi
+
+  TỔNG: 16 bảng → 17 bảng (thêm 1 bảng lot_item_shop_config)
+
+
+  27/02/2026 (v5) — PHASE 1: POPULATE batch_distribution KHI DUYỆT PHIẾU
+  ────────────────────────────────────────────────────────────────────────
+  Mục đích: Cột batch_distribution (JSON) trên C5 wp_global_batch phải phản ánh
+  chính xác số lượng hàng của mỗi batch đang nằm ở shop nào.
+
+  VẤN ĐỀ TRƯỚC ĐÂY:
+    - Batch tạo lúc tạo phiếu nhập → batch_distribution = '[]' (rỗng)
+    - Không có code nào populate distribution sau đó
+    - Dẫn đến UI "Tồn thực tế" luôn = 0 hoặc phải dùng fallback logic
+
+  GIẢI PHÁP: CLASS MỚI TGS_Batch_Distribution
+    File: functions/base/class-tgs-batch-distribution.php
+
+    Format JSON mới cho batch_distribution:
+      [{"blog_id": 1, "qty": 100, "sold": 0, "damaged": 0, "transferred_out": 0}]
+      → Tồn thực tế shop = qty - sold - damaged - transferred_out
+
+    Các method chính:
+      1. on_import_approved(ledger_id, blog_id)
+         → Duyệt phiếu nhập (type=1): gán remaining cho shop nhận
+         → Xử lý leaf batch (có sub-batch thì populate leaf, không thì batch gốc)
+
+      2. on_export_approved(ledger_id, blog_id)
+         → Duyệt phiếu xuất/bán (type=2): tăng "sold" tại shop
+         → Propagate sold lên batch cha nếu có
+
+      3. on_damage_approved(ledger_id, blog_id)
+         → Duyệt phiếu hủy (type=6): tăng "damaged" tại shop
+
+      4. on_return_approved(ledger_id, blog_id)
+         → Duyệt phiếu hoàn hàng (type=11): giảm "sold" tại shop
+
+      5. on_transfer_export_approved(source_blog_id, items_with_batch)
+         → Duyệt phiếu xuất chuyển kho: tăng "transferred_out" tại shop nguồn
+
+      6. on_transfer_import_approved(dest_blog_id, items_with_batch)
+         → Duyệt phiếu nhập chuyển kho: tăng "qty" tại shop đích
+
+      7. backfill_all_distributions()
+         → Migrate data cũ: gán remaining cho source_blog_id (chạy 1 lần)
+
+  ĐIỂM TÍCH HỢP (3 nơi):
+    1. class-tgs-ajax-ticket.php → handle_post_approve()
+       Phase C: Gọi TGS_Batch_Distribution cho type 1, 2, 6, 11
+
+    2. class-tgs-transfer-ajax.php → approve_export()
+       Gọi on_transfer_export_approved() sau khi xử lý lots
+
+    3. class-tgs-transfer-ajax.php → approve_import()
+       Gọi on_transfer_import_approved() sau khi xử lý lots
+
+  CẬP NHẬT UI:
+    - class-purchase-lot-ajax.php → get_shop_configs(): tính tồn theo
+      qty - sold - damaged - transferred_out (thay vì chỉ qty - sold)
+
+  BACKFILL:
+    - Chạy backfill_all_distributions() cho 94 batch cũ
+    - 90 leaf batches populated, 4 parent batches bỏ qua (đúng logic)
+    - Tất cả sub-batches của 4 parents đã được populate
+
+  KHÔNG ẢNH HƯỞNG:
+    - Không thêm bảng mới (dùng cột batch_distribution có sẵn trên C5)
+    - Không thay đổi cấu trúc bảng
+    - Backward compatible: nếu class chưa load → class_exists() = false → bỏ qua
+
+  TỔNG: vẫn 17 bảng (không thêm bảng)
+
+
+  26/02/2026 (v3) — HỢP ĐỒNG ↔ LÔ MUA: QUAN HỆ 1:1 + TỰ SINH LÔ
+  ─────────────────────────────────────────────────────────────────
+  Theo chỉ đạo sếp ngày 26/02/2026:
+  "Một lô chỉ thuộc một hợp đồng và mỗi hợp đồng chỉ có một lô."
+  "Khi tạo HĐ thì sẽ có 1 lô sinh ra. Vào thêm SP item vào lô đó."
+
+  THAY ĐỔI QUAN HỆ:
+    - Trước: 1 Hợp đồng → N Lô mua (1:N), tạo riêng lẻ
+    - Sau:   1 Hợp đồng ↔ 1 Lô mua (1:1), TỰ SINH khi tạo HĐ
+    - Đảm bảo bằng UNIQUE constraint trên contract_id ở C2
+
+  THAY ĐỔI LOGIC:
+    - Tạo HĐ → hệ thống TỰ ĐỘNG sinh 1 lô rỗng (draft)
+    - lot_code TỰ SINH: {contract_code}-LOT (VD: HD-VNM-2026-001-LOT)
+    - lot_title TỰ SINH: "Lô mua — " + contract_title (có thể sửa sau)
+    - Lô kế thừa NCC, blog_id, ngày bắt đầu/kết thúc từ HĐ
+    - Mua lẻ/gấp: tạo lô riêng (contract_id = NULL),
+      mã sinh: NCC-{mã_NCC}-{YYYYMMDD}-LOT
+
+  CỘT THAY ĐỔI:
+    C2. purchase_lot.contract_id: BIGINT → BIGINT UNIQUE (cho phép NULL — mua lẻ/gấp)
+    C2. purchase_lot.lot_code: không còn nhập tay, TỰ SINH từ contract_code
+    C2. purchase_lot.lot_title: TỰ SINH, cho sửa sau
+
+  CÁC FILE / BẢNG ẢNH HƯỞNG:
+    - C1 (supplier_contract): thêm mô tả tự sinh lô khi tạo HĐ
+    - C2 (purchase_lot): lot_code + lot_title tự sinh, QUAN HỆ cập nhật
+    - Luồng PHẦN E: Bước 1 gộp tạo HĐ + sinh lô, Bước 2 = thêm SP vào lô
+
+  KHÔNG ẢNH HƯỞNG:
+    - Cấu trúc bảng: KHÔNG thêm/bớt cột (lot_code, lot_title đã có sẵn)
+    - Chỉ thay đổi LOGIC sinh giá trị (backend code)
+    - C2b, C3, C4, C5, C6, C7, C8 — không thay đổi
+    - A1-A5, B1-B2 — không thay đổi
+    - Tổng vẫn 16 bảng
+
+
+  24/02/2026 (v2) — LÔ MUA HỖ TRỢ NHIỀU SẢN PHẨM
+  ─────────────────────────────────────────────────
+  Thiết kế lại C2 purchase_lot: 1 lô = N sản phẩm (trước đó 1 lô = 1 SP).
+
+  BẢNG MỚI:
+    + C2b. wp_global_purchase_lot_item — Dòng sản phẩm trong lô mua
+
+  CỘT BỎ (C2):
+    - lot_total_committed_qty     → chuyển xuống lot_item.committed_qty
+    - lot_imported_qty            → chuyển xuống lot_item.imported_qty
+    - lot_remaining_qty           → chuyển xuống lot_item.remaining_qty
+    - reorder_threshold_percent   → chuyển xuống lot_item (mỗi SKU ngưỡng riêng)
+
+  CỘT THÊM (C2):
+    + lot_total_items INT         — cache số dòng SP (tiện hiển thị)
+
+  THAY ĐỔI LOGIC:
+    - Reorder gợi ý THEO TỪNG SKU (không còn tổng lô)
+    - Quyền lợi NCC (volume rebate) tính theo từng SKU hoặc tổng lô
+    - lot_total_committed_value = SUM(lot_item.committed_value) — giữ lại ở C2 để query nhanh
+    - Batch C5 vẫn dùng lot_id (+ product_sku để tìm lot_item tương ứng)
+
+  KHÔNG ẢNH HƯỞNG:
+    - A3.lot_id, C3.lot_id, C5.lot_id, C7.lot_id — vẫn FK đến C2, không đổi
+    - C4, C6, C8, A1, A2, A4, A5, B1, B2 — không thay đổi
+
+  TỔNG: 15 bảng → 16 bảng
+
+
+  24/02/2026 — THÊM LÔ MUA NCC + BATCH ĐỆ QUY
+  ─────────────────────────────────────────────
+  Theo memo cuộc họp 24/02/2026:
+
+  BẢNG MỚI:
+    + C2. wp_global_purchase_lot — Lô mua NCC (cam kết SL lớn, nhập nhiều đợt)
+
+  CỘT MỚI:
+    + A3. local_ledger: thêm lot_id (phiếu mua thuộc lô nào)
+    + C3. purchase_policy: thêm lot_id (CS gắn vào lô)
+    + C5. batch: thêm lot_id, parent_batch_id, batch_level, split_criteria, is_auto_split
+    + C7. supplier_payment: thêm lot_id (công nợ nhóm theo lô)
+
+  THAY ĐỔI LOGIC:
+    - Batch hỗ trợ đệ quy cha-con (tối đa 2 cấp)
+    - Người mua có thể can thiệp chia batch (gợi ý + thủ công)
+    - Công nợ tính theo từng đợt nhập, nhóm được theo lô
+    - Gợi ý nhập tiếp khi batch bán gần hết
+    - Gợi ý quyền lợi NCC khi đạt mốc tích lũy
+    - FIFO chỉ trừ batch LÁ (leaf, không có con)
+    - Lot gắn vào batch LÁ (không gắn batch cha)
+
+  KHÔNG THAY ĐỔI:
+    - Hợp đồng NCC (C1)
+    - Policy items (C4)
+    - Batch movement (C6) — vẫn ghi theo batch lá
+    - Selling policy (C8)
+    - Các bảng local cũ (A1, A2, A4, A5)
+    - Bảng global cũ (B1, B2)
+
+  TỔNG: 14 bảng → 15 bảng (thêm 1 bảng purchase_lot)
+
+
+================================================================================
+  TỔNG KẾT: 17 BẢNG
+  - 5 bảng local (mỗi shop 1 bộ): A1-A5
+  - 2 bảng global cũ: B1-B2
+  - 10 bảng global mới: C1-C2c, C3-C8
+================================================================================
+
+
+================================================================================
+PHẦN H — CẤU TRÚC CODE & DANH SÁCH PHP CLASS (cập nhật 06/03/2026)
+================================================================================
+
+  ⚠️ PHẦN NÀY MÔ TẢ CODE THỰC TẾ ĐANG CHẠY — dùng để tham chiếu khi phát triển.
+  Đọc kết hợp với PHẦN A-C (bảng dữ liệu) và PHẦN E (luồng hoạt động).
+
+────────────────────────────────────────────────────────────────────────────────
+H1. Plugin tgs_shop_management (plugin gốc — quản lý shop + bán hàng)
+────────────────────────────────────────────────────────────────────────────────
+
+  📁 wp-content/plugins/tgs_shop_management/
+  ├── functions/
+  │   └── base/
+  │       ├── class-tgs-database.php           ← TẠO TẤT CẢ BẢNG (cả local + global)
+  │       ├── class-tgs-batch-distribution.php  ← ⭐ Quản lý batch_distribution JSON
+  │       ├── class-tgs-ajax-ticket.php         ← AJAX xử lý phiếu (duyệt → gọi Distribution)
+  │       ├── class-tgs-ajax-ticket-base.php    ← AJAX base cho phiếu (load, search...)
+  │       ├── class-tgs-transfer-ajax.php       ← AJAX luân chuyển nội bộ
+  │       ├── class-tgs-global-lots-helper.php  ← Helper: lot data, batch tree, modal data
+  │       └── ...
+  └── admin-views/
+      ├── tickets/
+      │   ├── ticket-create-base.js             ← JS class tạo phiếu (batch suggestion)
+      │   └── ticket_lot_select_modal.php       ← Modal "Chọn mã định danh" (lot + batch filter)
+      └── ...
+
+  CLASS QUAN TRỌNG:
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_Database (class-tgs-database.php)                                   │
+  │ ─ Tạo TẤT CẢ bảng khi activate plugin (cả local lẫn global)           │
+  │ ─ Bao gồm: A1-A5, B1-B2, C1-C8, C2b, C2c + bảng phụ                 │
+  │ ─ Dùng dbDelta() + version check (tgs_db_version option)              │
+  │ ─ Bảng phụ không trong design doc: local_ledger_meta, local_product_cat│
+  │   local_unified_product, local_person_loyalty_logs,                    │
+  │   wp_global_selling_policy_items (tách từ C8 selling_rules JSON)       │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ ⭐ TGS_Batch_Distribution (class-tgs-batch-distribution.php)            │
+  │ ─ Static utility class (KHÔNG register hook, gọi trực tiếp)            │
+  │ ─ Quản lý toàn bộ lifecycle của cột batch_distribution (JSON) trên C5  │
+  │                                                                        │
+  │ PUBLIC METHODS:                                                        │
+  │   on_import_approved(ledger_id, blog_id)                               │
+  │     → Duyệt phiếu nhập (type=1): gán remaining cho shop nhận          │
+  │     → Chỉ populate batch LÁ (leaf — không có con)                      │
+  │                                                                        │
+  │   on_export_approved(ledger_id, blog_id)                               │
+  │     → Duyệt phiếu bán/xuất (type=2): tăng "sold" tại shop             │
+  │     → Propagate sold lên batch cha (nếu có)                            │
+  │                                                                        │
+  │   on_damage_approved(ledger_id, blog_id)                               │
+  │     → Duyệt phiếu hủy (type=6): tăng "damaged" tại shop               │
+  │                                                                        │
+  │   on_return_approved(ledger_id, blog_id)                               │
+  │     → Duyệt phiếu hoàn (type=11): giảm "sold" tại shop                │
+  │                                                                        │
+  │   on_transfer_export_approved(source_blog_id, items_with_batch)        │
+  │     → Duyệt phiếu xuất chuyển kho: tăng "transferred_out" tại nguồn   │
+  │     → Input: [{batch_id, product_sku, quantity}, ...]                  │
+  │                                                                        │
+  │   on_transfer_import_approved(dest_blog_id, items_with_batch)          │
+  │     → Duyệt phiếu nhập chuyển kho: tăng "qty" tại đích                │
+  │                                                                        │
+  │   find_batch_for_export(product_sku, blog_id, qty_needed)              │
+  │     → FIFO: tìm batch lá cũ nhất có đủ SL tại shop                    │
+  │                                                                        │
+  │   get_batch_suggestions(product_sku, blog_id)                          │
+  │     → Gợi ý batch khi tạo phiếu chuyển kho (FEFO — exp_date ASC)      │
+  │                                                                        │
+  │   backfill_all_distributions()                                         │
+  │     → Migrate 1 lần: gán remaining cho source_blog_id (batch cũ)       │
+  │                                                                        │
+  │ PRIVATE HELPERS:                                                       │
+  │   parse_distribution(json) → safe JSON→array                           │
+  │   new_entry(blog_id, qty) → {blog_id, qty, sold:0, damaged:0, ...}    │
+  │   sum_qty(distribution) → tổng qty tất cả shop                        │
+  │   get_leaf_batches(batch_id) → array sub-batches hoặc [self]           │
+  │   add_sold_to_distribution() → cập nhật sold + propagate cha           │
+  │   add_damaged_to_distribution() → cập nhật damaged + propagate cha     │
+  │   reduce_sold_in_distribution() → giảm sold (hoàn) + propagate cha    │
+  │   propagate_to_parent() → cộng dồn sold/damaged lên batch cha         │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_Ajax_Ticket (class-tgs-ajax-ticket.php, ~2660 dòng)                │
+  │ ─ AJAX handler cho phiếu: tạo, sửa, duyệt, từ chối, xóa              │
+  │ ─ approve() → handle_post_approve():                                   │
+  │   • Type 1 (nhập):  gọi on_import_approved()                          │
+  │   • Type 2 (bán):   gọi on_export_approved()                          │
+  │   • Type 6 (hủy):   gọi on_damage_approved()                          │
+  │   • Type 11 (hoàn): gọi on_return_approved()                          │
+  │   Tất cả guard bởi class_exists('TGS_Batch_Distribution')             │
+  │                                                                        │
+  │ ─ get_ledger_items() (v8): FALLBACK BATCH RESOLUTION                   │
+  │   → Items chưa có batch_id được resolve tại read-time:                 │
+  │   → Tracking: lot → B2.batch_id; Non-tracking: SKU → C5 FIFO          │
+  │   → Gắn batch_info, batch_info_source, batch_candidates               │
+  │                                                                        │
+  │ ─ build_sub_batches_map($lots, $extra_batch_ids) (v8):                 │
+  │   → Nhận thêm batch_ids từ items (không chỉ lots)                     │
+  │   → Cả get_detail() + get_detail_transfer() truyền item batch_ids     │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_Transfer_Ajax (class-tgs-transfer-ajax.php, ~2873 dòng)            │
+  │ ─ AJAX handler cho luân chuyển nội bộ giữa shop                        │
+  │                                                                        │
+  │ STATIC HELPERS (v7 — 07/03):                                           │
+  │   collect_items_with_batch($items)                                     │
+  │     → Thu thập batch_id từ CẢ 2 nguồn:                                │
+  │     → SP ko tracking: lấy $item->batch_id trực tiếp                   │
+  │     → SP tracking: parse list_product_lots → query B2 → GROUP BY batch │
+  │     → Return: [{batch_id, product_sku, quantity}, ...]                 │
+  │                                                                        │
+  │   record_batch_movements($items, $from, $to, $type, $ledger, $blog)    │
+  │     → Insert C6 batch_movement cho mỗi batch trong items_with_batch    │
+  │     → Gọi tự động bên trong approve_export() + approve_import()        │
+  │                                                                        │
+  │   resolve_batch_id_for_item($source_item, $is_tracking)                │
+  │     → Dùng trong do_create_import_internal() khi tạo phiếu nhập đích  │
+  │     → SP ko tracking: return $item->batch_id                           │
+  │     → SP tracking: query lot đầu tiên → return lot.batch_id            │
+  │                                                                        │
+  │ MAIN METHODS:                                                          │
+  │ ─ approve_export():                                                    │
+  │   → Gọi collect_items_with_batch() (thay vì inline loop cũ)           │
+  │   → Gọi on_transfer_export_approved(source_blog, items)               │
+  │   → Gọi record_batch_movements() — ghi C6                             │
+  │ ─ approve_import():                                                    │
+  │   → Gọi collect_items_with_batch() (thay vì inline loop cũ)           │
+  │   → Gọi on_transfer_import_approved(dest_blog, items)                 │
+  │   → Gọi record_batch_movements() — ghi C6                             │
+  │ ─ do_create_import_internal():                                         │
+  │   → batch_id dùng resolve_batch_id_for_item() thay vì $item->batch_id │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_Ajax_Ticket_Base (class-tgs-ajax-ticket-base.php)                  │
+  │ ─ AJAX base cho tạo phiếu: load products, search lots, batch suggest   │
+  │ ─ get_batch_suggestions():                                             │
+  │   → action: ticket_get_batch_suggestions                               │
+  │   → Nhận product_sku, blog_id → gọi Distribution::get_batch_suggest..│
+  │   → Trả về danh sách batch có hàng tại shop (FEFO)                    │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_Global_Lots_Helper (class-tgs-global-lots-helper.php)              │
+  │ ─ Utility class cho lot data (B2 product_lots)                         │
+  │ ─ format_lot_for_modal() — format lot data cho modal chọn mã ĐD       │
+  │ ─ build_batch_tree() — xây cây batch cho sidebar batch filter          │
+  │ ─ get_lots_by_batch() — query lots theo batch_id                       │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+H2. Plugin tgs_purchase_management (plugin mua hàng — quản lý batch, lot, CS)
+────────────────────────────────────────────────────────────────────────────────
+
+  📁 wp-content/plugins/tgs_purchase_management/
+  ├── includes/
+  │   ├── class-purchase-batch-ajax.php    ← AJAX batch (split, merge, stats, shop dist)
+  │   ├── class-purchase-lot-ajax.php      ← AJAX lô mua (CRUD lot, lot_item, shop_config)
+  │   ├── class-purchase-contract-ajax.php ← AJAX hợp đồng NCC
+  │   ├── class-purchase-policy-ajax.php   ← AJAX chính sách mua
+  │   └── ...
+  └── admin-views/
+      ├── batches/
+      │   ├── list.php                     ← Danh sách batch
+      │   └── detail.php                   ← ⭐ Chi tiết batch (1485 dòng, nhiều section)
+      ├── lots/
+      │   ├── list.php                     ← Danh sách lô mua
+      │   └── detail.php                   ← Chi tiết lô (957 dòng, shop config)
+      ├── contracts/
+      ├── policies/
+      └── ...
+
+
+────────────────────────────────────────────────────────────────────────────────
+H3. Plugin tgs_pos (POS bán hàng — PWA-ready, giao diện Tailwind)
+────────────────────────────────────────────────────────────────────────────────
+
+  📁 wp-content/plugins/tgs_pos/
+  ├── bizgpt-pos.php                       ← Entry point, register shortcode
+  ├── functions/ajax/
+  │   ├── class-tgs-pos-ajax-order.php     ← ⭐ save_order() → hook tgs_shop_management
+  │   ├── class-tgs-pos-ajax-product.php   ← Search SP, quét barcode, get lots
+  │   └── class-tgs-pos-ajax-customer.php  ← Tìm/tạo/sửa khách hàng POS
+  ├── include/
+  │   └── class-tmdpos-init.php            ← Bootstrap: shortcode, enqueue assets
+  └── templates/front/
+      ├── pos-view.php                     ← Giao diện POS chính (quét, bán, TT)
+      ├── pos-orders.php                   ← Lịch sử đơn hàng
+      └── pos-customers.php                ← Quản lý khách hàng
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_POS_Ajax_Order (class-tgs-pos-ajax-order.php, ~1774 dòng)          │
+  │ ─ NONCE: tmd_pos_nonce                                                 │
+  │ ─ save_order():                                                        │
+  │   → Build payload từ POS frontend (products, lots, discounts, gifts)   │
+  │   → $products_data[]: sku, quantity, selling_price, batch_id,          │
+  │     lot_barcodes[], applied_promotions[]                               │
+  │   → $gift_products[]: SP tặng kèm từ selling_policy                   │
+  │   → Payment: cash/transfer/card/QR (WooCommerce gateway prefix ttck_up)│
+  │   → do_action_ref_array('tgs_shop_create_sale_from_pos', [...])        │
+  │   → Nhận kết quả qua $result (passed by ref) → trả JSON cho POS       │
+  │                                                                        │
+  │ ─ list_orders(): Lịch sử đơn bán tại shop (phân trang, filter date)   │
+  │ ─ get_order_detail(): Chi tiết 1 đơn (items, receipt, payment info)    │
+  │ ─ cancel_order(): Hủy đơn + tạo phiếu hoàn                            │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_POS_Ajax_Product (class-tgs-pos-ajax-product.php, ~751 dòng)       │
+  │ ─ search_products(): Tìm SP (tên, SKU, barcode) → trả giá, hình, lot  │
+  │ ─ search_by_lot_barcode(): ⭐ Quét barcode mã ĐD → resolve SP tracking │
+  │   → Query B2 (product_lots) → trả product info + lot info + batch info │
+  │ ─ get_product_lots(): Lấy danh sách lot chưa bán của SP tại shop      │
+  │ ─ get_product_info(): Chi tiết SP (giá, tồn, batch suggestions)        │
+  │ ─ check_promotions():                                                  │
+  │   → Gọi tgs_selling_policy_get_applicable_promotions($context)         │
+  │   → Trả danh sách KM tự động áp dụng cho cart hiện tại                │
+  │ ─ apply_coupon():                                                      │
+  │   → Gọi tgs_selling_policy_apply_coupon($code, $context)              │
+  │   → Validate mã coupon/voucher → trả discount                         │
+  │ ─ get_customer_points():                                               │
+  │   → Gọi tgs_selling_policy_get_rewards_for_customer(...)              │
+  │   → Trả quà đổi điểm cho loyalty type 8                               │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+H4. Plugin tgs_selling_policy (Chính sách bán hàng — engine + admin UI)
+────────────────────────────────────────────────────────────────────────────────
+
+  📁 wp-content/plugins/tgs_selling_policy/
+  ├── tgs-selling-policy.php               ← Entry: register routes, sidebar, load
+  ├── includes/
+  │   ├── class-selling-policy-engine.php  ← ⭐ Runtime engine (gọi từ POS)
+  │   └── class-selling-policy-ajax.php    ← CRUD admin (tạo/sửa/xóa chính sách)
+  └── admin-views/
+      ├── dashboard.php                    ← Tổng quan chính sách
+      ├── list.php                         ← Danh sách chính sách (filter, search)
+      ├── add.php                          ← Form tạo mới
+      └── detail.php                       ← Chi tiết + sửa chính sách
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ ⭐ TGS_Selling_Policy_Engine (class-selling-policy-engine.php, ~1145 dòng)│
+  │ ─ KHÔNG register hook riêng — expose 3 global helpers gọi trực tiếp     │
+  │                                                                        │
+  │ GLOBAL HELPERS:                                                        │
+  │   tgs_selling_policy_get_applicable_promotions($context)               │
+  │     → $context = [cart_items, customer_id, blog_id, total, ...]        │
+  │     → Query active policies (auto_apply=1, loại trừ type 11 voucher)   │
+  │     → Evaluate từng policy → trả [{policy_id, discount, gifts, ...}]  │
+  │                                                                        │
+  │   tgs_selling_policy_apply_coupon($code, $context)                     │
+  │     → Validate coupon code → tìm policy type 11                        │
+  │     → Check hạn, lượt dùng, min order → trả discount                  │
+  │                                                                        │
+  │   tgs_selling_policy_get_rewards_for_customer($id, $total, $items)     │
+  │     → Type 8 loyalty: tính điểm → gợi ý quà đổi được                  │
+  │                                                                        │
+  │ EVALUATE ENGINE — evaluate_policy($policy, $context):                  │
+  │   Switch selling_policy_type:                                          │
+  │     1  fixed_price        → Giá cố định cho SKU                        │
+  │     2  buy_x_get_y        → Mua X tặng Y (check qty threshold)        │
+  │     3  combo              → Combo giá (check all items in combo)       │
+  │     4  batch_price        → Giá riêng cho batch cụ thể                 │
+  │     6  percent_discount   → Giảm % trên SP / đơn                      │
+  │     7  grand_opening      → KM khai trương (blog_id match)            │
+  │     8  loyalty            → Tích điểm + đổi quà                        │
+  │     9  flash_sale         → Flash sale (check time window)             │
+  │     10 threshold          → Đạt mốc X đồng → giảm                     │
+  │     11 voucher            → Nhập mã → giảm (qua apply_coupon riêng)   │
+  │     12 birthday           → KM sinh nhật (check customer DOB)          │
+  │                                                                        │
+  │ BẢNG SỬ DỤNG:                                                         │
+  │   wp_global_selling_policy (C8) — bảng chính                           │
+  │   wp_global_selling_policy_items — bảng index phụ (sku/batch)          │
+  │     → Sync khi save policy: extract SKU/batch từ selling_rules JSON    │
+  │     → Dùng để tìm nhanh "policy nào áp cho SKU này?"                  │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_Selling_Policy_Ajax (class-selling-policy-ajax.php, ~514 dòng)     │
+  │ ─ NONCE: tgs_selling_nonce                                             │
+  │ ─ AJAX:                                                                │
+  │   tgs_selling_policy_list          → Danh sách chính sách (paged)      │
+  │   tgs_selling_policy_get           → Chi tiết 1 chính sách             │
+  │   tgs_selling_policy_save          → Tạo/sửa (+ sync_policy_items)    │
+  │   tgs_selling_policy_delete        → Soft delete                       │
+  │   tgs_selling_policy_clone         → Clone từ policy khác              │
+  │   tgs_selling_policy_stats         → Thống kê doanh số theo policy     │
+  │   tgs_selling_policy_toggle        → Bật/tắt chính sách               │
+  │                                                                        │
+  │ ─ sync_policy_items($policy_id, $selling_rules):                       │
+  │   → Parse selling_rules JSON → extract item_type + item_value          │
+  │   → DELETE old rows → INSERT new rows vào _items table                 │
+  │   → Cho phép query nhanh: "SKU ABC thuộc chính sách nào?"             │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ TGS_API_Sales (class-tgs-api-sales.php, ~870 dòng) — xem H1           │
+  │ ─ Bridge: nhận payload từ POS qua hook tgs_shop_create_sale_from_pos   │
+  │ ─ create_sale() 6 steps + Step 6.2b (v9) FIFO + batch_distribution    │
+  │ ─ fifo_assign_batch() — FIFO gán batch cho SP non-tracking             │
+  │ ─ Cũng expose REST /wp-json/tgs-sales/ cho external caller            │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+
+────────────────────────────────────────────────────────────────────────────────
+H5. Danh sách toàn bộ AJAX Endpoints (tham chiếu cho FE dev)
+────────────────────────────────────────────────────────────────────────────────
+
+  Tất cả dùng nonce: 'tgs_purchase_nonce' (plugin purchase_management)
+  hoặc nonce tương ứng của plugin shop_management.
+
+  ▸ BATCH (class-purchase-batch-ajax.php → TGS_Purchase_Batch_Ajax)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ AJAX Action                                │ Method                   │
+  ├────────────────────────────────────────────┼──────────────────────────┤
+  │ tgs_purchase_batch_list                    │ get_list()               │
+  │ tgs_purchase_batch_get                     │ get_one()                │
+  │ tgs_purchase_batch_generate                │ generate_from_ledger()   │
+  │ tgs_purchase_batch_stats                   │ get_stats()              │
+  │ tgs_purchase_batch_multi_stats             │ get_multi_stats()        │
+  │ tgs_purchase_batch_split                   │ split_batch()            │
+  │ tgs_purchase_batch_merge                   │ merge_sub_batches()      │
+  │ tgs_purchase_batch_confirm                 │ confirm_batches()        │
+  │ tgs_purchase_batch_get_lots_for_assign     │ get_lots_for_assign()    │
+  │ tgs_purchase_batch_assign_lots             │ assign_lots_to_sub_batch │
+  │ tgs_purchase_batch_auto_assign_lots        │ auto_assign_lots()       │
+  │ tgs_purchase_batch_shop_distribution       │ get_shop_distribution()  │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+  ▸ LÔ MUA (class-purchase-lot-ajax.php → TGS_Purchase_Lot_Ajax)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ AJAX Action                                │ Method                   │
+  ├────────────────────────────────────────────┼──────────────────────────┤
+  │ tgs_purchase_lot_list                      │ get_list()               │
+  │ tgs_purchase_lot_get                       │ get_one()                │
+  │ tgs_purchase_lot_save                      │ save()                   │
+  │ tgs_purchase_lot_delete                    │ (soft delete)            │
+  │ tgs_purchase_lot_item_list                 │ get_items()              │
+  │ tgs_purchase_lot_item_save                 │ save_item()              │
+  │ tgs_purchase_lot_item_delete               │ delete_item()            │
+  │ tgs_purchase_lot_progress                  │ get_progress()           │
+  │ tgs_purchase_shop_config_list              │ get_shop_configs()       │
+  │ tgs_purchase_shop_config_save              │ save_shop_config()       │
+  │ tgs_purchase_shop_config_bulk_save         │ bulk_save_shop_config()  │
+  │ tgs_purchase_shop_config_delete            │ delete_shop_config()     │
+  │ tgs_purchase_get_shops                     │ get_shops()              │
+  │ tgs_purchase_supplier_history              │ get_supplier_history()   │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+  ▸ HỢP ĐỒNG (class-purchase-contract-ajax.php)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ tgs_purchase_contract_list                 │ get_list()               │
+  │ tgs_purchase_contract_get                  │ get_one()                │
+  │ tgs_purchase_contract_save                 │ save()                   │
+  │ tgs_purchase_contract_delete               │ (soft delete)            │
+  │ tgs_purchase_contract_get_suppliers        │ get_suppliers()          │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+  ▸ CHÍNH SÁCH MUA (class-purchase-policy-ajax.php)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ tgs_purchase_policy_list                   │ get_list()               │
+  │ tgs_purchase_policy_get                    │ get_one()                │
+  │ tgs_purchase_policy_save                   │ save()                   │
+  │ tgs_purchase_policy_delete                 │ (soft delete)            │
+  │ tgs_purchase_policy_item_list              │ get_items()              │
+  │ tgs_purchase_policy_item_save              │ save_item()              │
+  │ tgs_purchase_policy_item_delete            │ delete_item()            │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+  ▸ PHIẾU + BATCH SUGGESTION (tgs_shop_management)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ ticket_get_batch_suggestions               │ get_batch_suggestions()  │
+  │  (class-tgs-ajax-ticket-base.php)          │ → Distribution::suggest  │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+  ▸ POS BÁN HÀNG (class-tgs-pos-ajax-*.php → nonce: tmd_pos_nonce)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ AJAX Action                                │ Method / Mô tả          │
+  ├────────────────────────────────────────────┼──────────────────────────┤
+  │ tgs_pos_save_order                         │ save_order() → hook     │
+  │ tgs_pos_list_orders                        │ list_orders() (lịch sử) │
+  │ tgs_pos_get_order_detail                   │ get_order_detail()       │
+  │ tgs_pos_cancel_order                       │ cancel_order() → hoàn   │
+  │ tgs_pos_search_products                    │ search_products()        │
+  │ tgs_pos_search_by_lot_barcode              │ search_by_lot_barcode()  │
+  │ tgs_pos_get_product_lots                   │ get_product_lots()       │
+  │ tgs_pos_get_product_info                   │ get_product_info()       │
+  │ tgs_pos_check_promotions                   │ check_promotions()       │
+  │ tgs_pos_apply_coupon                       │ apply_coupon()           │
+  │ tgs_pos_get_customer_points                │ get_customer_points()    │
+  │ tgs_pos_search_customer                    │ search_customer()        │
+  │ tgs_pos_save_customer                      │ save_customer()          │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+  ▸ CHÍNH SÁCH BÁN (class-selling-policy-ajax.php → nonce: tgs_selling_nonce)
+  ┌────────────────────────────────────────────┬──────────────────────────┐
+  │ AJAX Action                                │ Method / Mô tả          │
+  ├────────────────────────────────────────────┼──────────────────────────┤
+  │ tgs_selling_policy_list                    │ get_list() (paged)       │
+  │ tgs_selling_policy_get                     │ get_one() (chi tiết)     │
+  │ tgs_selling_policy_save                    │ save() + sync_items      │
+  │ tgs_selling_policy_delete                  │ soft delete              │
+  │ tgs_selling_policy_clone                   │ clone() (từ template)    │
+  │ tgs_selling_policy_stats                   │ get_stats() (doanh số)   │
+  │ tgs_selling_policy_toggle                  │ toggle() (bật/tắt)       │
+  └────────────────────────────────────────────┴──────────────────────────┘
+
+
+================================================================================
+PHẦN I — CÁCH LƯU DỮ LIỆU & QUERY PATTERNS (tham chiếu cho developer)
+================================================================================
+
+  Phần này giải thích CHI TIẾT cách dữ liệu được lưu và truy vấn.
+  Đọc kèm PHẦN A-C để hiểu cấu trúc bảng, đọc kèm PHẦN H để biết file code.
+
+────────────────────────────────────────────────────────────────────────────────
+I1. batch_distribution — JSON quan trọng nhất hệ thống
+────────────────────────────────────────────────────────────────────────────────
+
+  Cột batch_distribution trên bảng wp_global_batch (C5) lưu CHÍNH XÁC
+  số lượng hàng của MỖI BATCH đang nằm ở SHOP NÀO, bao gồm cả lịch sử
+  bán/hủy/chuyển.
+
+  ▸ FORMAT JSON:
+    [
+      {"blog_id": 5,  "qty": 100, "sold": 30, "damaged": 2, "transferred_out": 10},
+      {"blog_id": 12, "qty": 50,  "sold": 15, "damaged": 0, "transferred_out": 0}
+    ]
+
+  ▸ Ý NGHĨA TỪNG TRƯỜNG:
+    blog_id          = Shop nào (WordPress multisite blog_id)
+    qty              = Tổng SL hàng ĐÃ TỪNG CÓ tại shop (nhập + nhận chuyển)
+    sold             = Đã bán cho khách tại shop này
+    damaged          = Hủy/hỏng tại shop này
+    transferred_out  = Đã chuyển đi shop khác từ shop này
+
+  ▸ CÔNG THỨC TỒN KHO THỰC TẾ TẠI SHOP:
+    ┌──────────────────────────────────────────────────────────────┐
+    │  stock = qty - sold - damaged - transferred_out              │
+    └──────────────────────────────────────────────────────────────┘
+    VD: qty=100, sold=30, damaged=2, transferred_out=10 → stock = 58
+
+  ▸ KHI NÀO ĐƯỢC POPULATE (tự động, không cần gọi thủ công):
+
+    ┌─────────────────────────┬────────────────────┬──────────────────────────┐
+    │ Sự kiện                 │ Trường thay đổi    │ Nơi xử lý               │
+    ├─────────────────────────┼────────────────────┼──────────────────────────┤
+    │ Duyệt phiếu nhập (1)   │ qty += remaining   │ on_import_approved()     │
+    │ Duyệt phiếu bán (2)    │ sold += SL bán     │ on_export_approved()     │
+    │ Duyệt phiếu hủy (6)    │ damaged += SL hủy  │ on_damage_approved()     │
+    │ Duyệt phiếu hoàn (11)  │ sold -= SL hoàn    │ on_return_approved()     │
+    │ Duyệt xuất chuyển kho  │ transferred_out++  │ on_transfer_export_..()  │
+    │ Duyệt nhập chuyển kho  │ qty += SL nhận     │ on_transfer_import_..()  │
+    └─────────────────────────┴────────────────────┴──────────────────────────┘
+
+    ⚠️ CHUYỂN KHO: batch_id được resolve khác nhau theo loại SP (v7):
+    → SP ko tracking: batch_id từ ledger_item.batch_id (frontend gửi)
+    → SP tracking:    batch_id từ lot.batch_id qua collect_items_with_batch()
+    → Chi tiết: xem mục I8 "Transfer → batch_distribution"
+
+  ▸ QUY TẮC QUAN TRỌNG:
+    1. CHỈ populate trên BATCH LÁ (leaf — không có con)
+       → Batch cha (parent) KHÔNG CÓ distribution riêng
+       → Muốn xem tổng batch cha → SUM distribution của tất cả con
+    2. Khi duyệt nhập (type=1), nếu batch có sub-batch:
+       → Chỉ populate sub-batch (leaf), KHÔNG populate parent
+       → Sub-batch nào chưa có distribution → mặc định gán về source_blog_id
+    3. Khi bán/hủy/hoàn: cập nhật leaf + propagate_to_parent()
+       → batch cha.batch_sold_quantity / batch_damaged_quantity cũng được cập nhật
+    4. batch_distributed_quantity KHÔNG trừ vào remaining (chỉ đổi vị trí)
+    5. Phần chưa phân phối (remaining - SUM(distribution.stock)):
+       → Mặc định nằm tại source_blog_id
+
+  ▸ VÍ DỤ LIFECYCLE HOÀN CHỈNH:
+
+    Bước 1: Duyệt phiếu nhập 100 SP tại Shop #5
+    → batch_distribution = [{"blog_id":5, "qty":100, "sold":0, "damaged":0, "transferred_out":0}]
+    → stock tại Shop #5 = 100
+
+    Bước 2: Bán 30 SP tại Shop #5
+    → batch_distribution = [{"blog_id":5, "qty":100, "sold":30, "damaged":0, "transferred_out":0}]
+    → stock tại Shop #5 = 70
+
+    Bước 3: Chuyển 20 SP từ Shop #5 sang Shop #12
+    → Phiếu xuất (Shop #5): transferred_out += 20
+    → Phiếu nhập (Shop #12): thêm entry mới qty=20
+    → batch_distribution = [
+        {"blog_id":5,  "qty":100, "sold":30, "damaged":0, "transferred_out":20},
+        {"blog_id":12, "qty":20,  "sold":0,  "damaged":0, "transferred_out":0}
+      ]
+    → stock Shop #5 = 100-30-0-20 = 50
+    → stock Shop #12 = 20-0-0-0 = 20
+
+    Bước 4: Hủy 2 SP tại Shop #5
+    → batch_distribution = [
+        {"blog_id":5,  "qty":100, "sold":30, "damaged":2, "transferred_out":20},
+        {"blog_id":12, "qty":20,  "sold":0,  "damaged":0, "transferred_out":0}
+      ]
+    → stock Shop #5 = 100-30-2-20 = 48
+
+
+────────────────────────────────────────────────────────────────────────────────
+I2. Leaf Batch (Batch Lá) — Khái niệm trung tâm
+────────────────────────────────────────────────────────────────────────────────
+
+  "Batch lá" = batch KHÔNG CÓ CON (không có sub-batch nào trỏ parent_batch_id
+  về nó). Đây là đơn vị thực tế khi:
+    - Populate batch_distribution
+    - Tính tồn kho per-shop
+    - FIFO khi bán
+    - Gắn lot (B2.batch_id → batch lá)
+
+  ▸ SQL XÁC ĐỊNH BATCH LÁ:
+    SELECT b.*
+    FROM wp_global_batch b
+    WHERE b.is_deleted = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM wp_global_batch c
+        WHERE c.parent_batch_id = b.batch_id AND c.is_deleted = 0
+      )
+
+  ▸ TRƯỜNG HỢP:
+    - Batch gốc KHÔNG chia → chính nó là batch lá (level=0, parent=NULL)
+    - Batch gốc CÓ chia → batch gốc KHÔNG phải lá, các sub-batch mới là lá
+    - Batch gốc + 3 sub-batch → 3 batch lá, 1 batch cha (không phải lá)
+
+  ▸ ĐỆ QUY TỐI ĐA 2 CẤP (thiết kế quy định):
+    - Level 0: Batch gốc (parent_batch_id = NULL)
+    - Level 1: Sub-batch (parent_batch_id = id batch gốc)
+    - KHÔNG có level 2 (không cho chia sub-sub-batch)
+    - Khi rải shop → dùng batch_distribution JSON (không chia tiếp)
+
+
+────────────────────────────────────────────────────────────────────────────────
+I3. Tính tồn kho theo shop (2 nơi dùng, cùng logic)
+────────────────────────────────────────────────────────────────────────────────
+
+  Có 2 nơi tính stock per-shop, cùng công thức nhưng scope khác:
+
+  ▸ NƠI 1: Trang chi tiết LÔ (lots/detail.php → get_shop_configs)
+    Scope: TẤT CẢ batch lá thuộc lô + SKU cụ thể
+    Query:
+      SELECT b.batch_distribution, b.batch_remaining_quantity, b.source_blog_id
+      FROM wp_global_batch b
+      WHERE b.lot_id = {lot_id}
+        AND b.product_sku = '{sku}'
+        AND b.is_deleted = 0 AND b.batch_status IN (0,1)
+        AND NOT EXISTS (
+          SELECT 1 FROM wp_global_batch c
+          WHERE c.parent_batch_id = b.batch_id AND c.is_deleted = 0
+        )
+    Parse: for each leaf → parse distribution → aggregate per blog_id
+    Output: {blog_id: stock_total, ...}
+
+  ▸ NƠI 2: Trang chi tiết BATCH (batches/detail.php → get_shop_distribution)
+    Scope: CHỈ batch này (nếu parent → gộp children; nếu leaf → chính nó)
+    Query: Xem batch_id → tìm leaf batches (get_leaf_batches_for_distribution)
+    Parse: for each leaf → parse distribution → aggregate per blog_id
+    Output: {blog_id: {qty, sold, damaged, transferred_out, stock, batches[]}, ...}
+    THÊM: min/max từ lot_item_shop_config (nếu batch thuộc lô cam kết)
+
+  ▸ CÔNG THỨC CHUNG (DÙ Ở ĐÂU):
+    stock_at_shop = qty - sold - damaged - transferred_out
+
+  ▸ XỬ LÝ "CHƯA PHÂN PHỐI":
+    Nếu SUM(distribution.stock) < batch.remaining → phần dư = chưa phân phối
+    → Gán về source_blog_id (shop nhập gốc)
+    → Hiển thị kèm flag "is_undistributed = true"
+
+
+────────────────────────────────────────────────────────────────────────────────
+I4. Min/Max tồn kho shop (lot_item_shop_config — C2c)
+────────────────────────────────────────────────────────────────────────────────
+
+  ▸ BẢNG: wp_global_lot_item_shop_config
+    Mỗi bản ghi = 1 cấu hình min/max cho 1 SKU (lot_item) tại 1 shop (blog_id)
+    UNIQUE (lot_item_id, blog_id) — mỗi shop chỉ 1 config per SKU trong lô
+
+  ▸ CÁCH LƯU:
+    config_id, lot_item_id, lot_id, product_sku, blog_id, blog_name_cache,
+    min_qty, max_qty, is_active
+
+  ▸ CÁCH SỬ DỤNG:
+    1. Admin vào trang lô → chọn lot_item (SKU) → set min/max per shop
+       → AJAX: tgs_purchase_shop_config_save (từng cái)
+       → AJAX: tgs_purchase_shop_config_bulk_save (hàng loạt)
+    2. UI đọc: tgs_purchase_shop_config_list
+       → Trả về configs[] + stock_per_shop (tính real-time từ batch_distribution)
+    3. So sánh: stock < min → cảnh báo "thiếu", stock > max → cảnh báo "dư"
+
+  ▸ HIỂN THỊ (2 NƠI):
+
+    a) Trang LÔ (lots/detail.php) — Tab "Cấu hình tồn kho theo shop":
+       → Bảng: Shop | Tồn kho | Min | Max | Trạng thái
+       → Màu: đỏ (< min), vàng (> max), xanh (OK)
+       → Có thể CRUD + bulk apply
+
+    b) Trang BATCH (batches/detail.php) — Card "Phân bổ theo shop":
+       → Đọc min/max từ lot_item_shop_config (nếu batch có lot_id)
+       → Hiển thị trong cùng bảng với tồn kho per-shop
+       → Chỉ READ (không edit min/max ở đây, edit ở trang lô)
+
+
+────────────────────────────────────────────────────────────────────────────────
+I5. FIFO khi bán SP không tracking
+────────────────────────────────────────────────────────────────────────────────
+
+  SP không tracking = SP không có lot (B2), chỉ quản lý SL qua batch.
+  Khi bán → hệ thống tự tìm batch lá cũ nhất (FIFO) để trừ.
+
+  ▸ LOGIC FIFO:
+    1. Tìm batch LÁ (leaf) ACTIVE tại shop đang bán:
+       WHERE product_sku = '{sku}'
+         AND batch_status IN (0,1)
+         AND is_deleted = 0
+         AND batch_distribution chứa blog_id = {shop} VÀ stock > 0
+       ORDER BY batch_import_date ASC  ← cũ nhất trước
+    2. Trừ batch cũ nhất trước
+    3. Nếu hết SL → trừ tiếp batch kế tiếp
+    4. Cập nhật: batch.batch_sold_quantity + distribution.sold
+    5. Ghi vào ledger_item.batch_cost_breakdown:
+       [{"batch_id":A, "qty":3, "unit_cost":15000},
+        {"batch_id":B, "qty":2, "unit_cost":16000}]
+
+  ▸ BACKEND: TGS_Batch_Distribution::find_batch_for_export()
+    → Tìm batch lá đầu tiên có đủ SL
+    → Nếu SL không đủ ở 1 batch → split ra nhiều batch (qua batch_cost_breakdown)
+
+
+────────────────────────────────────────────────────────────────────────────────
+I6. Batch suggestion khi chuyển kho
+────────────────────────────────────────────────────────────────────────────────
+
+  Khi tạo phiếu "Bán hàng nội bộ" (xuất chuyển kho), hệ thống GỢI Ý batch
+  nào nên chuyển (ưu tiên hết HSD sớm — FEFO).
+
+  ▸ BACKEND: TGS_Batch_Distribution::get_batch_suggestions(sku, blog_id)
+    → Tìm tất cả batch lá có hàng tại shop (parse distribution)
+    → Sắp theo exp_date ASC (FEFO — First Expired First Out)
+    → Trả về: [{batch_id, batch_code, exp_date, available_qty, ...}, ...]
+
+  ▸ FRONTEND: ticket-create-base.js
+    → AJAX: ticket_get_batch_suggestions
+    → Hiển thị dropdown gợi ý batch khi chọn SP không tracking
+    → User chọn batch → gán vào ledger_item.batch_id
+
+  ▸ CHỈ ÁP DỤNG CHO: SP KHÔNG tracking (SP tracking dùng modal quét lot)
+
+
+────────────────────────────────────────────────────────────────────────────────
+I7. Batch filter trong modal chọn mã định danh (SP tracking)
+────────────────────────────────────────────────────────────────────────────────
+
+  Modal "Chọn mã định danh" (ticket_lot_select_modal.php) có SIDEBAR 2 chế độ:
+
+  ▸ CHẾ ĐỘ 1: "Lô thực tế" — Nhóm lot theo lot_code + exp_date
+    → Checkbox lọc: chọn lô nào → chỉ hiện lot thuộc lô đó
+
+  ▸ CHẾ ĐỘ 2: "Batch" — Nhóm lot theo batch (batch lá)
+    → Backend: TGS_Global_Lots_Helper::build_batch_tree()
+    → Xây cây: batch cha → batch con, kèm SL lot per batch
+    → UI: Card batch, click → lọc lot theo batch đó
+    → Hỗ trợ: rút gọn batch_code, hiện split_criteria, badge SL
+
+  ▸ KHI NÀO DÙNG: Khi shop có nhiều batch → lọc nhanh lot theo batch
+    VD: Shop có 500 lot từ 5 batch khác nhau → chọn batch HSD gần nhất → quét
+
+
+────────────────────────────────────────────────────────────────────────────────
+I8. Transfer → batch_distribution: Cách resolve batch_id (v7 — 07/03)
+────────────────────────────────────────────────────────────────────────────────
+
+  ⚠️ ĐÂY LÀ PHẦN QUAN TRỌNG: giải thích TẠI SAO và CÁCH NÀO batch_distribution
+  được cập nhật khi chuyển kho cho CẢ 2 loại SP (tracking và không tracking).
+
+  ▸ VẤN ĐỀ:
+    Frontend (ticket-detail-base.js) chỉ gửi batch_allocations cho SP KHÔNG
+    tracking. SP tracking dùng modal lot → KHÔNG có batch_allocations.
+    → ledger_item.batch_id = NULL cho mọi SP tracking sau khi save_ticket_base()
+    → Nếu chỉ dùng $item->batch_id, SP tracking KHÔNG BAO GIỜ có batch_id
+    → batch_distribution KHÔNG được cập nhật → UI phân bổ shop bị trống
+
+  ▸ GIẢI PHÁP (collect_items_with_batch):
+    Backend tự resolve batch_id từ 2 nguồn khác nhau tùy loại SP:
+
+    ┌────────────────────┬──────────────────────┬────────────────────────────┐
+    │ Loại SP            │ Nguồn batch_id       │ Cách lấy                   │
+    ├────────────────────┼──────────────────────┼────────────────────────────┤
+    │ Không tracking     │ ledger_item.batch_id │ Trực tiếp từ DB            │
+    │ (FIFO, ko có lot)  │                      │ (frontend đã gửi)          │
+    ├────────────────────┼──────────────────────┼────────────────────────────┤
+    │ Có tracking        │ lot.batch_id (B2)    │ Parse list_product_lots    │
+    │ (HSD, có lot)      │                      │ → query wp_global_product  │
+    │                    │                      │   _lots WHERE lot_id IN()  │
+    │                    │                      │ → GROUP BY batch_id        │
+    │                    │                      │ → count(*) = quantity      │
+    └────────────────────┴──────────────────────┴────────────────────────────┘
+
+  ▸ LUỒNG CHI TIẾT KHI DUYỆT XUẤT CHUYỂN KHO (approve_export):
+
+    1. Load ledger_items của phiếu xuất (type=12)
+    2. Gọi collect_items_with_batch($items):
+       a) Với mỗi item, kiểm tra list_product_lots:
+          - Không có (SP ko tracking) → dùng $item->batch_id, qty = $item->quantity
+          - Có (SP tracking) → parse lot_ids → query B2 → batch_id từ lot → nhóm
+       b) Trả về mảng [{batch_id, product_sku, quantity}, ...]
+    3. Gọi TGS_Batch_Distribution::on_transfer_export_approved(source_blog, items)
+       → Tăng transferred_out tại shop nguồn
+    4. Gọi record_batch_movements(items, from, to, type=1, ledger_id, blog_id)
+       → Ghi C6 wp_global_batch_movement cho mỗi batch
+
+  ▸ LUỒNG CHI TIẾT KHI DUYỆT NHẬP CHUYỂN KHO (approve_import):
+
+    1. Load ledger_items của phiếu nhập (type=13)
+    2. Gọi collect_items_with_batch($items):
+       (giống logic trên, resolve từ lot hoặc item.batch_id)
+    3. Gọi TGS_Batch_Distribution::on_transfer_import_approved(dest_blog, items)
+       → Tăng qty tại shop đích
+    4. Gọi record_batch_movements(items, from, to, type=1, ledger_id, blog_id)
+       → Ghi C6 batch_movement
+
+  ▸ BATCH_ID TRÊN PHIẾU NHẬP ĐÍCH (do_create_import_internal):
+    Khi approve_export() tạo phiếu nhập tự động ở shop đích:
+    → Mỗi item cần batch_id → dùng resolve_batch_id_for_item()
+    → SP ko tracking: lấy trực tiếp $source_item->batch_id
+    → SP tracking: query lot đầu tiên trong list_product_lots → lot.batch_id
+    → batch_id được ghi vào ledger_item mới tại shop đích
+
+  ▸ VÍ DỤ MINH HỌA:
+
+    Phiếu xuất #500 từ Shop #1 → Shop #10:
+    ┌──────────────────────────┬────────────────────┬──────────┬──────────┐
+    │ Item                     │ list_product_lots  │ batch_id │ Kết quả  │
+    ├──────────────────────────┼────────────────────┼──────────┼──────────┤
+    │ Bỉm Moony (ko tracking) │ (rỗng)             │ 52       │ batch=52 │
+    │ Sữa Bimbosan (tracking) │ 645,646,647        │ NULL     │ batch=116│
+    │   lot #645 → batch 116  │                    │          │ qty=3    │
+    └──────────────────────────┴────────────────────┴──────────┴──────────┘
+    → items_with_batch = [{batch_id:52, sku:'bim-moony', qty:1},
+                          {batch_id:116, sku:'bimbosan', qty:3}]
+    → on_transfer_export_approved(1, items) → transferred_out +1 (52), +3 (116)
+    → on_transfer_import_approved(10, items) → qty +1 (52), +3 (116) tại Shop #10
+
+
+────────────────────────────────────────────────────────────────────────────────
+I10. Query tham chiếu nhanh (copy-paste được)
+────────────────────────────────────────────────────────────────────────────────
+
+  ▸ Lấy tất cả batch lá thuộc lô + SKU:
+    SELECT b.*
+    FROM wp_global_batch b
+    WHERE b.lot_id = {lot_id}
+      AND b.product_sku = '{sku}'
+      AND b.is_deleted = 0
+      AND b.batch_status IN (0,1)
+      AND NOT EXISTS (
+        SELECT 1 FROM wp_global_batch c
+        WHERE c.parent_batch_id = b.batch_id AND c.is_deleted = 0
+      );
+
+  ▸ Lấy sub-batch của 1 parent:
+    SELECT * FROM wp_global_batch
+    WHERE parent_batch_id = {parent_id} AND is_deleted = 0;
+
+  ▸ Lấy min/max config cho 1 lot_item:
+    SELECT * FROM wp_global_lot_item_shop_config
+    WHERE lot_item_id = {lot_item_id} AND is_active = 1;
+
+  ▸ Tìm lot_item từ lot + SKU:
+    SELECT * FROM wp_global_purchase_lot_item
+    WHERE lot_id = {lot_id}
+      AND product_sku = '{sku}'
+      AND (is_deleted = 0 OR is_deleted IS NULL);
+
+  ▸ Lấy tên shop từ blog_id:
+    SELECT option_value FROM wp_{blog_id}_options
+    WHERE option_name = 'blogname' LIMIT 1;
+
+  ▸ Tồn kho 1 SP tại 1 shop (tất cả batch):
+    -- Cần parse JSON batch_distribution trong PHP/JS
+    -- Không có cách query trực tiếp bằng SQL thuần (JSON column)
+    -- Dùng class get_shop_configs() hoặc get_shop_distribution()
+
+  ▸ Tổng tồn kho toàn hệ thống 1 SKU:
+    SELECT SUM(b.batch_remaining_quantity) AS total_remaining
+    FROM wp_global_batch b
+    WHERE b.product_sku = '{sku}'
+      AND b.is_deleted = 0
+      AND b.batch_status IN (0,1)
+      AND NOT EXISTS (
+        SELECT 1 FROM wp_global_batch c
+        WHERE c.parent_batch_id = b.batch_id AND c.is_deleted = 0
+      );
+
+  ▸ Batch FIFO cho bán hàng:
+    SELECT b.batch_id, b.batch_code, b.batch_remaining_quantity,
+           b.batch_avg_cost_per_unit, b.batch_distribution
+    FROM wp_global_batch b
+    WHERE b.product_sku = '{sku}'
+      AND b.is_deleted = 0
+      AND b.batch_status IN (0,1)
+      AND b.batch_remaining_quantity > 0
+      AND NOT EXISTS (
+        SELECT 1 FROM wp_global_batch c
+        WHERE c.parent_batch_id = b.batch_id AND c.is_deleted = 0
+      )
+    ORDER BY b.batch_import_date ASC;
+    -- Sau đó parse distribution JSON trong PHP để lọc shop có hàng
+
+  ▸ Tìm hợp đồng + lô + lot_item cho 1 batch:
+    SELECT b.batch_id, b.batch_code, b.lot_id,
+           l.lot_code, l.contract_id,
+           c.contract_code, c.contract_title,
+           li.lot_item_id, li.committed_qty, li.imported_qty
+    FROM wp_global_batch b
+    LEFT JOIN wp_global_purchase_lot l ON l.lot_id = b.lot_id
+    LEFT JOIN wp_global_supplier_contract c ON c.contract_id = l.contract_id
+    LEFT JOIN wp_global_purchase_lot_item li
+      ON li.lot_id = b.lot_id AND li.product_sku = b.product_sku
+    WHERE b.batch_id = {batch_id};
+
+
+────────────────────────────────────────────────────────────────────────────────
+I9. Fallback batch resolution — batch_id tại read-time (v8 — 06/03)
+────────────────────────────────────────────────────────────────────────────────
+
+  Không phải tất cả loại phiếu đều ghi batch_id lúc TẠO item.
+  Để card "Nhóm Batch" hiện đúng trên MỌI phiếu, get_ledger_items()
+  resolve batch tại thời điểm ĐỌC:
+
+  ▸ LUỒNG FALLBACK (cuối hàm get_ledger_items):
+
+    1. Skip items ĐÃ CÓ batch_id hoặc batch_info
+
+    2. SP TRACKING (có lot_details):
+       → Lấy global_product_lot_id đầu tiên từ lot_details
+       → Query: SELECT batch_id FROM wp_global_product_lots WHERE lot_id = ?
+       → Fetch batch info từ wp_global_batch nếu chưa có trong batch_map
+       → Gắn batch_info_source = 'lot_fallback'
+
+    3. SP NON-TRACKING (có local_product_sku, không có lots):
+       → Query: SELECT * FROM wp_global_batch
+                WHERE product_sku = ? AND batch_status IN ('active','distributed')
+                ORDER BY batch_import_date ASC, batch_id ASC  -- FIFO
+       → Gắn batch đầu tiên (cũ nhất) làm batch_info
+       → Nếu nhiều batch → gắn thêm batch_candidates[] cho frontend
+       → batch_info_source = 'sku_fallback'
+
+  ▸ LƯU Ý:
+    - Fallback KHÔNG GHI batch_id vào DB, chỉ enrich tại API response
+    - Phiếu bán (type=2) + phiếu hủy (type=6) sau v8 CÓ THỂ có batch_id
+      lúc tạo (từ batch_allocations / item_insert) → fallback không cần chạy
+    - batch_info_source giúp debug: 'lot_fallback' | 'sku_fallback' | absent (=direct)
+
+
+================================================================================
+PHẦN J — CÁC TÍNH NĂNG ĐÃ TRIỂN KHAI (tính đến 06/03/2026)
+================================================================================
+
+  Phần này liệt kê tính năng ĐÃ CODE XONG, đang chạy trên hệ thống.
+  Dùng để biết cái nào đã làm, cái nào chưa, tránh làm lại.
+
+────────────────────────────────────────────────────────────────────────────────
+J1. Quản lý Hợp đồng NCC (C1) ✅
+────────────────────────────────────────────────────────────────────────────────
+  - CRUD hợp đồng (tạo, sửa, xóa mềm, xem danh sách + chi tiết)
+  - Tạo HĐ → TỰ SINH 1 lô mua (C2) kèm theo (1:1)
+  - Lấy danh sách NCC từ local_ledger_person (type=1)
+  - File: class-purchase-contract-ajax.php, contracts/list.php, contracts/detail.php
+
+────────────────────────────────────────────────────────────────────────────────
+J2. Quản lý Lô mua NCC (C2, C2b) ✅
+────────────────────────────────────────────────────────────────────────────────
+  - CRUD lô mua (tạo, sửa, xóa mềm, xem chi tiết)
+  - CRUD lot_item (thêm/sửa/xóa SP trong lô)
+  - Tiến độ nhập (get_progress): tính imported_qty / committed_qty per SKU
+  - Hiện batch liên quan, policy liên quan
+  - Gợi ý nhập tiếp (reorder alert) khi tồn < threshold%
+  - File: class-purchase-lot-ajax.php, lots/list.php, lots/detail.php
+
+────────────────────────────────────────────────────────────────────────────────
+J3. Cấu hình Min/Max tồn kho shop (C2c) ✅
+────────────────────────────────────────────────────────────────────────────────
+  - CRUD config: save, bulk_save, delete per shop per lot_item
+  - Tính stock per shop real-time từ batch_distribution (leaf batches)
+  - So sánh stock vs min/max → cảnh báo đỏ (thiếu), vàng (dư), xanh (OK)
+  - UI trên trang chi tiết lô: chọn SKU → bảng min/max per shop
+  - File: class-purchase-lot-ajax.php (get_shop_configs, save_shop_config,
+    bulk_save_shop_config, delete_shop_config), lots/detail.php
+
+────────────────────────────────────────────────────────────────────────────────
+J4. Quản lý Chính sách mua (C3, C4) ✅
+────────────────────────────────────────────────────────────────────────────────
+  - CRUD chính sách + policy_item (dòng rule)
+  - Clone từ template
+  - Liên kết với hợp đồng, lô mua, NCC
+  - File: class-purchase-policy-ajax.php, policies/list.php, policies/detail.php
+
+────────────────────────────────────────────────────────────────────────────────
+J5. Quản lý Batch (C5) ✅
+────────────────────────────────────────────────────────────────────────────────
+  - Danh sách batch (phân trang, tìm kiếm, lọc)
+  - Chi tiết batch (thông tin, snapshot, thống kê, movements, sub-batch)
+  - Sinh batch từ phiếu mua (generate_from_ledger)
+  - Chia sub-batch (split_batch) + gộp (merge_sub_batches)
+  - Xác nhận / kích hoạt batch (confirm_batches)
+  - Thống kê SKU (get_stats, get_multi_stats)
+  - File: class-purchase-batch-ajax.php, batches/list.php, batches/detail.php
+
+────────────────────────────────────────────────────────────────────────────────
+J6. Phân bổ mã định danh vào Sub-batch ✅
+────────────────────────────────────────────────────────────────────────────────
+  - Hiện lot chưa gán → kéo thả / chọn → gán vào sub-batch
+  - Auto assign lot theo exp_date matching
+  - File: class-purchase-batch-ajax.php (get_lots_for_assign, assign_lots,
+    auto_assign_lots), batches/detail.php
+
+────────────────────────────────────────────────────────────────────────────────
+J7. Populate batch_distribution khi duyệt phiếu ✅
+────────────────────────────────────────────────────────────────────────────────
+  - Class TGS_Batch_Distribution (914 dòng)
+  - Tự động cập nhật JSON khi duyệt: nhập (1), bán (2), hủy (6), hoàn (11)
+  - Tự động cập nhật khi chuyển kho: xuất (transferred_out), nhập (qty)
+  - Propagate sold/damaged lên batch cha
+  - Backfill cho 94 batch cũ (90 leaf populated)
+  - File: class-tgs-batch-distribution.php
+  - Tích hợp: class-tgs-ajax-ticket.php, class-tgs-transfer-ajax.php
+
+────────────────────────────────────────────────────────────────────────────────
+J8. Batch suggestion khi tạo phiếu chuyển kho ✅
+────────────────────────────────────────────────────────────────────────────────
+  - SP không tracking: gợi ý batch nào nên chuyển (FEFO — HSD sớm trước)
+  - UI: dropdown gợi ý trên form tạo phiếu "Bán hàng nội bộ"
+  - Backend: get_batch_suggestions() → Distribution::get_batch_suggestions()
+  - File: class-tgs-ajax-ticket-base.php, ticket-create-base.js
+
+────────────────────────────────────────────────────────────────────────────────
+J9. Batch filter trong modal chọn mã định danh ✅
+────────────────────────────────────────────────────────────────────────────────
+  - SP tracking: modal "Chọn mã định danh" có sidebar 2 chế độ
+  - Chế độ "Lô thực tế": nhóm lot theo lot_code
+  - Chế độ "Batch": nhóm lot theo batch (cây batch cha→con)
+  - Click batch → lọc lot, checkbox chọn nhiều batch
+  - File: ticket_lot_select_modal.php, ticket-create-base.js,
+    class-tgs-global-lots-helper.php (build_batch_tree)
+
+────────────────────────────────────────────────────────────────────────────────
+J10. Phân bổ batch theo shop trên trang chi tiết batch ✅ (MỚI 06/03)
+────────────────────────────────────────────────────────────────────────────────
+  - Card "Phân bổ theo shop" trên batches/detail.php
+  - Gộp tồn kho từ tất cả batch lá (parent → children, leaf → self)
+  - Hiển thị per-shop: qty, sold, damaged, transferred_out, stock
+  - Min/max từ lot_item_shop_config (nếu batch thuộc lô cam kết)
+  - Cảnh báo: đỏ (dưới min), vàng (trên max), xanh (OK)
+  - 3 summary boxes: tổng tồn kho, shop có hàng, số batch lá
+  - Chi tiết per-batch per-shop (toggle)
+  - Banner: sub-batch → hiện link batch cha, lot → hiện thông tin lô
+  - File: class-purchase-batch-ajax.php (get_shop_distribution),
+    batches/detail.php (loadShopDistribution, renderShopDistribution)
+
+
+────────────────────────────────────────────────────────────────────────────────
+J11. Fix transfer→distribution cho SP tracking + batch_movement ✅ (MỚI 07/03)
+────────────────────────────────────────────────────────────────────────────────
+  - Fix: batch_distribution KHÔNG cập nhật khi chuyển kho SP có tracking HSD/lot
+  - Root cause: ledger_item.batch_id = NULL cho SP tracking (frontend đúng design)
+  - 3 helper mới: collect_items_with_batch(), record_batch_movements(),
+    resolve_batch_id_for_item() — tất cả trong TGS_Transfer_Ajax
+  - approve_export() + approve_import() dùng collect_items_with_batch() thay inline loop
+  - do_create_import_internal() dùng resolve_batch_id_for_item() thay $item->batch_id
+  - wp_global_batch_movement (C6) nay auto-populated (trước = luôn rỗng)
+  - UI batches/detail.php: lotStatusBadge() + cột "Đang ở shop" (lot biết shop nào)
+  - Backfill 7 batches + movement records cho tất cả transfer lịch sử
+  - File: class-tgs-transfer-ajax.php, class-tgs-base-import-export.php,
+    batches/detail.php
+
+
+────────────────────────────────────────────────────────────────────────────────
+J12. Card "Nhóm Batch" trên ticket detail + fallback batch resolution ✅ (MỚI 06/03)
+────────────────────────────────────────────────────────────────────────────────
+  - Card "Nhóm Batch" trên ticket-detail-base.php: tổng quan batch cho TẤT CẢ phiếu
+  - Phân 2 nhóm: SP không theo dõi HSD (🔶) + SP có theo dõi HSD (🔷)
+  - Sub-batch expand: batch cha (level 0) → hiện từng sub-batch con
+  - Split criteria tag thân thiện: color→🎨 Màu, batch_delivery→🚚 Đợt giao
+  - Fallback batch resolution trong get_ledger_items():
+    → Tracking: lot_details → B2.batch_id → fetch batch info
+    → Non-tracking: SKU → C5 FIFO (batch cũ nhất active/distributed)
+  - batch_allocations mở rộng cho phiếu bán (type=2)
+  - batch_id thêm vào $item_insert cho phiếu hủy (type=6)
+  - build_sub_batches_map() nhận extra_batch_ids từ items
+  - Fix movements display trên batches/detail.php (int movement_type + quantity col)
+  - File: class-tgs-ajax-ticket.php, class-tgs-ajax-ticket-base.php,
+    ticket-detail-base.php, ticket-detail-base.js, batches/detail.php
+
+
+────────────────────────────────────────────────────────────────────────────────
+J13. Tích hợp POS bán hàng + FIFO batch + batch_distribution khi bán ✅ (MỚI v9)
+────────────────────────────────────────────────────────────────────────────────
+  - Rà soát 3 plugin: tgs_pos, tgs_selling_policy, tgs_shop_management (API sales)
+  - Xác nhận luồng POS hoạt động đúng design: quét barcode → search → check promotions
+    → apply coupon → save_order → hook → create_sale (6 steps)
+  - FIX BUG NGHIÊM TRỌNG: Step 6 auto-approve (POS) bypass toàn bộ batch logic:
+    → batch_distribution.sold KHÔNG cập nhật (bán bao nhiêu, batch vẫn nguyên)
+    → batch_id = NULL (không biết bán từ batch nào, FIFO vô hiệu)
+    → batch_cost_breakdown KHÔNG có (không tính giá vốn FIFO)
+  - Thêm Step 6.2b: resolve batch_id (tracking: lot→B2, non-tracking: FIFO)
+  - Thêm fifo_assign_batch(): FIFO leaf batch → parse distribution → gán batch
+    → Hỗ trợ split nhiều batch nếu 1 batch không đủ SL
+    → Ghi batch_cost_breakdown JSON cho tính giá vốn
+  - Gọi on_export_approved() → cập nhật batch_distribution.sold tại shop
+  - Xác nhận tgs_selling_policy engine đúng: 12 loại policy, 3 global helpers
+  - Xác nhận tgs_pos đúng: payload đầy đủ (lots, gifts, promotions, payment)
+  - File thay đổi: class-tgs-api-sales.php (+Step 6.2b, +fifo_assign_batch)
+  - File KHÔNG sửa: tgs_pos (đúng), tgs_selling_policy (đúng), ticket, distribution
+
+
+────────────────────────────────────────────────────────────────────────────────
+J14. Trung tâm cảnh báo (Alert Center) ✅ (MỚI v9)
+────────────────────────────────────────────────────────────────────────────────
+  - 4 tab cảnh báo: Lô chưa nhập đủ, Batch cận HSD, Tồn kho dưới min, Tồn kho trên max
+  - 6 AJAX endpoint (list + resolve + KPI đếm)
+  - KPI tổng trên tiêu đề + badge từng tab (tooltip chi tiết)
+  - Autocomplete search shop (650 shops) thay dropdown
+  - File: class-purchase-alert-ajax.php (~900 dòng), alerts/index.php (~767 dòng)
+
+
+────────────────────────────────────────────────────────────────────────────────
+J-FUTURE. Tính năng chưa triển khai (roadmap)
+────────────────────────────────────────────────────────────────────────────────
+
+  ❌ Công nợ NCC (C7) — UI quản lý thanh toán, lịch sử TT, cảnh báo quá hạn
+  ❌ Gợi ý quyền lợi NCC — Khi đạt mốc tích lũy (policy_item type=7)
+  ❌ Dashboard kế toán — Tồn kho, lãi lỗ, vòng quay, biên LN per batch/lô/NCC
+  ✅ Auto-reorder khi min/max → bảng C9 reorder_suggestion + 4 AJAX endpoints (v9c)
+  ❌ Gộp sub-batch phức tạp (khi đã có giao dịch bán/hủy/hoàn)
+  ❌ Sơ đồ tổ chức (wp_global_organization) — áp selling_policy theo vùng/miền
+  ❌ Đa tiền tệ (SP nhập khẩu)
+  ❌ Export/Import chính sách JSON
+  ❌ Hoàn đơn POS: POS gửi cancel_order → phiếu hoàn → nhập lại batch + lot ACTIVE
+  ❌ Đồng bộ tồn kho POS ↔ WooCommerce (sàn online)
+  ❌ Báo cáo selling_policy: hiệu quả KM, tỉ lệ chuyển đổi, ROI per campaign
