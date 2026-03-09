@@ -189,8 +189,8 @@
 
                 <div class="bp-highlight bp-highlight-info" style="margin-top:12px;">
                     📌 <strong>Thay đổi so với thiết kế cũ:</strong> Các cột <code>lot_total_committed_qty</code>,
-                    <code>lot_imported_qty</code>, <code>lot_remaining_qty</code>, <code>reorder_threshold_percent</code>
-                    đã <strong>chuyển xuống C2b lot_item</strong> — vì mỗi SKU có SL cam kết và ngưỡng riêng.
+                    <code>lot_imported_qty</code>, <code>lot_remaining_qty</code>, <code>reorder_threshold</code>
+                    đã <strong>chuyển xuống C2b lot_item</strong> và đổi thành <code>reorder_threshold_qty</code> (số lượng thay vì %).
                 </div>
             </div>
 
@@ -211,7 +211,7 @@
                     <tr class="col-new"><td><code>imported_qty</code></td><td>DECIMAL(15,3)</td><td>Đã nhập = SUM(batch.total_qty WHERE lot_id & sku)</td></tr>
                     <tr class="col-new"><td><code>remaining_qty</code></td><td>DECIMAL(15,3)</td><td>Chưa nhập = committed_qty − imported_qty</td></tr>
                     <tr><td colspan="3" style="background:#f5f5f9;font-weight:600">── Gợi ý tái nhập (per-SKU) ──</td></tr>
-                    <tr class="col-new"><td><code>reorder_threshold_percent</code></td><td>DECIMAL(5,2)</td><td>Ngưỡng % → nhắc nhập tiếp (mặc định 20%)</td></tr>
+                    <tr class="col-new"><td><code>reorder_threshold_qty</code></td><td>INT</td><td>Ngưỡng số lượng → tồn kho ≤ số này thì nhắc nhập tiếp</td></tr>
                     <tr><td colspan="3" style="background:#f5f5f9;font-weight:600">── Mở rộng ──</td></tr>
                     <tr class="col-new"><td><code>lot_item_note</code></td><td>TEXT</td><td>Ghi chú</td></tr>
                     <tr class="col-new"><td><code>lot_item_meta</code></td><td>JSON</td><td>Mở rộng</td></tr>
@@ -226,42 +226,39 @@
             <!-- Tab: Gợi ý tái nhập -->
             <div class="bp-tab-content" data-tab-content="reorder">
                 <div class="bp-highlight bp-highlight-info" style="margin-bottom:16px;">
-                    📌 <strong>Gợi ý nhập tiếp kiểm tra TỪNG SKU riêng biệt</strong> — mỗi SP có ngưỡng <code>reorder_threshold_percent</code> riêng trong C2b.
+                    📌 <strong>Gợi ý nhập tiếp kiểm tra TẪNG SKU riêng biệt</strong> — mỗi SP có ngưỡng <code>reorder_threshold_qty</code> riêng trong C2b.
                 </div>
 
                 <div class="bp-formula">
                     FOREACH lot_item IN lot:<br>
-                    &nbsp;&nbsp;SUM(batch_lá.remaining WHERE lot_id = X AND sku = S) ≤ threshold% × lot_item.committed_qty → 🔔 NHẮC
+                    &nbsp;&nbsp;SUM(batch_lá.remaining WHERE lot_id = X AND sku = S) ≤ lot_item.reorder_threshold_qty → 🔔 NHẮC
                 </div>
 
                 <div class="bp-example" style="margin-top:16px;">
                     <div class="bp-example-title"><i class='bx bx-bell'></i> Ví dụ trigger theo từng SKU</div>
                     <table class="bp-table" style="font-size:13px;">
-                        <thead><tr><th>SKU</th><th>committed</th><th>threshold</th><th>Tồn kho batch lá</th><th>%</th><th>Kết quả</th></tr></thead>
+                        <thead><tr><th>SKU</th><th>committed</th><th>Ngưỡng</th><th>Tồn kho batch lá</th><th>Kết quả</th></tr></thead>
                         <tbody>
                             <tr>
                                 <td>SKU-DL01 (Dielac)</td>
                                 <td>5,000</td>
-                                <td>20%</td>
+                                <td>1,000</td>
                                 <td>900</td>
-                                <td style="color:var(--bp-batch)"><strong>18%</strong></td>
-                                <td>🔔 <strong>NHẮC!</strong> "Dielac tồn 900/5,000 (18%)"</td>
+                                <td>🔔 <strong>NHẮC!</strong> "Dielac tồn 900 ≤ ngưỡng 1,000"</td>
                             </tr>
                             <tr>
                                 <td>SKU-GR02 (Grow)</td>
                                 <td>3,000</td>
-                                <td>20%</td>
+                                <td>600</td>
                                 <td>800</td>
-                                <td style="color:var(--bp-lot)"><strong>27%</strong></td>
-                                <td>✅ OK — chưa cần nhập</td>
+                                <td>✅ OK — tồn 800 > ngưỡng 600</td>
                             </tr>
                             <tr>
                                 <td>SKU-TU03 (Sữa tươi)</td>
                                 <td>2,000</td>
-                                <td>25%</td>
+                                <td>500</td>
                                 <td>400</td>
-                                <td style="color:var(--bp-batch)"><strong>20%</strong></td>
-                                <td>🔔 <strong>NHẮC!</strong> "Sữa tươi tồn 400/2,000 (20%)"</td>
+                                <td>🔔 <strong>NHẮC!</strong> "Sữa tươi tồn 400 ≤ ngưỡng 500"</td>
                             </tr>
                         </tbody>
                     </table>

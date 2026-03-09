@@ -279,7 +279,7 @@ Mô tả: Cam kết mua SL lớn từ NCC, nhập nhiều đợt, NHIỀU sản 
   -- GỢI Ý TÁI NHẬP --
   auto_reorder_enabled           TINYINT DEFAULT 0           -- 1=tự gợi ý nhập tiếp khi batch bán gần hết
   reorder_notify_roles           JSON                        -- Ai nhận thông báo ["admin","purchaser"]
-  -- (reorder_threshold_percent đã chuyển xuống C2b — mỗi SP có ngưỡng riêng)
+  -- (reorder_threshold_percent đã chuyển xuống C2b và đổi thành reorder_threshold_qty — số lượng thay vì %)
 
   -- TRẠNG THÁI --
   lot_status                     TINYINT                     -- 0=draft, 1=active, 2=completed, 3=cancelled
@@ -360,8 +360,8 @@ Mô tả: Mỗi dòng = 1 SKU trong lô mua. 1 lô có N dòng (N sản phẩm).
   remaining_qty                  DECIMAL(15,3)                -- Chưa nhập = committed_qty - imported_qty
 
   -- GỢI Ý TÁI NHẬP (per-SKU) --
-  reorder_threshold_percent      DECIMAL(5,2) DEFAULT 20      -- Ngưỡng %: khi tồn kho batch_lá ≤ X% × committed_qty → nhắc
-                                                              -- VD: committed=5000, tồn=900 → 18% < 20% → nhắc
+  reorder_threshold_qty          INT DEFAULT 0                -- Ngưỡng số lượng: khi tồn kho batch_lá ≤ số này → nhắc
+                                                              -- VD: committed=5000, threshold=400, tồn=200 ≤ 400 → nhắc
 
   -- MỞ RỘNG --
   lot_item_note                  TEXT                         -- Ghi chú
@@ -400,7 +400,7 @@ Mô tả: Mỗi dòng = 1 SKU trong lô mua. 1 lô có N dòng (N sản phẩm).
     committed_value: 900000000
     imported_qty: 3500
     remaining_qty: 1500
-    reorder_threshold_percent: 20.00
+    reorder_threshold_qty: 400
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -1200,6 +1200,22 @@ PHẦN F — GHI CHÚ PHÁT TRIỂN TƯƠNG LAI
 PHẦN G — CHANGELOG
 ================================================================================
 
+  09/03/2026 — ĐỔI reorder_threshold_percent → reorder_threshold_qty (C2b)
+  ─────────────────────────────────────────────────────────────────
+
+  LÝ DO: Ngưỡng gợi ý nhập tiếp lưu bằng SỐ LƯỢNG (INT) thay vì %.
+         Đơn giản hơn, dễ hiểu khi demo: "Tồn kho ≤ 400 → nhắc nhập tiếp".
+         Không liên quan % cam kết. User tự nhập con số ngưỡng.
+
+  THAY ĐỔI:
+    - C2b: reorder_threshold_percent DECIMAL(5,2) → reorder_threshold_qty INT
+    - Backend: so sánh trực tiếp remaining_stock ≤ threshold_qty (không tính %)
+    - Frontend: input nhập/lưu số lượng thẳng, không auto-calc, không convert
+    - Migration: 2026_03_09_000100_rename_reorder_threshold_to_qty.php
+      + Nếu cột cũ tồn tại → RENAME + migrate data (% × committed / 100)
+      + Nếu cột mới đã có → skip
+      + Nếu cả hai không có → ADD cột mới
+
   06/03/2026 (v9) — TÍCH HỢP POS BÁN HÀNG + CHÍNH SÁCH BÁN + FIFO BATCH
   ─────────────────────────────────────────────────────────────────
 
@@ -1661,7 +1677,7 @@ PHẦN G — CHANGELOG
     - lot_total_committed_qty     → chuyển xuống lot_item.committed_qty
     - lot_imported_qty            → chuyển xuống lot_item.imported_qty
     - lot_remaining_qty           → chuyển xuống lot_item.remaining_qty
-    - reorder_threshold_percent   → chuyển xuống lot_item (mỗi SKU ngưỡng riêng)
+    - reorder_threshold_percent   → chuyển xuống lot_item và đổi thành reorder_threshold_qty (số lượng thay vì %)
 
   CỘT THÊM (C2):
     + lot_total_items INT         — cache số dòng SP (tiện hiển thị)

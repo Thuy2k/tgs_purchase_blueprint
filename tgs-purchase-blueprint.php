@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       TGS Purchase Blueprint
  * Plugin URI:        https://thegioisua.vn
- * Description:       Blueprint trực quan — Luồng Mua Bán Hàng Thế Giới Sữa (650 cửa hàng). 18 bảng (v9c). Dùng thuyết trình & onboard team. Cập nhật 07/03/2026.
- * Version:           2.2.0
+ * Description:       Blueprint trực quan — Luồng Mua Bán Hàng Thế Giới Sữa (650 cửa hàng). 18 bảng (v9c). Dùng thuyết trình & onboard team. Cập nhật 09/03/2026.
+ * Version:           2.2.1
  * Author:            TGS Dev Team
  * Text Domain:       tgs-purchase-blueprint
  * Requires Plugins:  tgs_shop_management
@@ -16,7 +16,7 @@ if (!defined('ABSPATH')) {
 /* ── Hằng số ── */
 define('TGS_BP_PATH', plugin_dir_path(__FILE__));
 define('TGS_BP_URL',  plugin_dir_url(__FILE__));
-define('TGS_BP_VER',  '2.2.0');
+define('TGS_BP_VER',  '2.2.1');
 
 /**
  * Danh sách 7 trang blueprint.

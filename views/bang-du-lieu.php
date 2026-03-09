@@ -411,7 +411,7 @@
             <tr><td><code>imported_qty</code></td><td>DECIMAL(15,3)</td><td>DEFAULT 0</td><td>Đã nhập (SUM các đợt cho SKU này)</td></tr>
             <tr><td><code>remaining_qty</code></td><td>DECIMAL(15,3)</td><td></td><td>Chưa nhập = committed_qty − imported_qty</td></tr>
             <tr><td colspan="4" style="background:#f5f5f9;font-weight:600;font-size:12px;">── Gợi ý tái nhập per-SKU ──</td></tr>
-            <tr><td><code>reorder_threshold_percent</code></td><td>DECIMAL(5,2)</td><td>DEFAULT 20</td><td>Ngưỡng % riêng SKU → trigger nhắc nhập tiếp</td></tr>
+            <tr><td><code>reorder_threshold_qty</code></td><td>INT</td><td>DEFAULT 0</td><td>Ngưỡng số lượng → tồn kho ≤ số này thì nhắc nhập tiếp</td></tr>
             <tr><td colspan="4" style="background:#f5f5f9;font-weight:600;font-size:12px;">── Ghi chú ──</td></tr>
             <tr><td><code>lot_item_note</code></td><td>TEXT</td><td></td><td>Ghi chú cho dòng SP</td></tr>
             <tr><td><code>lot_item_meta</code></td><td>JSON</td><td></td><td>Mở rộng (HSD yêu cầu, đóng gói…)</td></tr>
@@ -461,7 +461,7 @@
         <div class="bp-highlight bp-highlight-new" style="margin-top:12px;">
             📌 <strong>UNIQUE INDEX:</strong> <code>(lot_item_id, blog_id)</code> — 1 shop chỉ có 1 config cho 1 lot_item.<br>
             📌 <strong>INDEX:</strong> <code>(product_sku, blog_id)</code> — query nhanh khi quét auto-reorder.<br>
-            📌 <strong>Khác C2b reorder_threshold:</strong> C2b là ngưỡng % <em>nhập tiếp từ NCC</em> (tổng lô). C2c là <em>tồn kho tại shop</em> (MIN/MAX cụ thể).
+            📌 <strong>Khác C2b reorder_threshold:</strong> C2b là ngưỡng <em>số lượng tồn kho</em> để nhắc nhập tiếp từ NCC (tổng lô). C2c là <em>tồn kho tại shop</em> (MIN/MAX cụ thể).
         </div>
     </div>
 
