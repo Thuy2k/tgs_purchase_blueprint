@@ -2,7 +2,7 @@
   THIẾT KẾ HỆ THỐNG MUA BÁN HÀNG - THẾ GIỚI SỮA (650 CỬA HÀNG)
   WordPress Multisite POS System
   Ngày tạo: 13/02/2026
-  Cập nhật: 07/03/2026 (v9c — Thêm C9 auto-reorder suggestion + fix backup C2c)
+  Cập nhật: 10/03/2026 (v10 — UX Redesign lot/contract/policy pages + phần K ghi chú)
   Tổng: 18 bảng (5 bảng local + 2 bảng global cũ + 11 bảng global mới)
 ================================================================================
 
@@ -2786,3 +2786,62 @@ J-FUTURE. Tính năng chưa triển khai (roadmap)
   ❌ Hoàn đơn POS: POS gửi cancel_order → phiếu hoàn → nhập lại batch + lot ACTIVE
   ❌ Đồng bộ tồn kho POS ↔ WooCommerce (sàn online)
   ❌ Báo cáo selling_policy: hiệu quả KM, tỉ lệ chuyển đổi, ROI per campaign
+
+────────────────────────────────────────────────────────────────────────────────
+K. GHI CHÚ UX REDESIGN (10/03/2026)
+────────────────────────────────────────────────────────────────────────────────
+Cập nhật giao diện toàn bộ flow mua hàng để thống nhất phong cách, đơn giản hóa.
+
+  NGUYÊN TẮC CHUNG:
+  - Phong cách: card-modern (border:none, border-radius:10px, box-shadow nhẹ)
+  - Bỏ hết icon bx-* trong tiêu đề card, nút bấm, badge
+  - Dùng bullet • cho phần tips thay vì bx-right-arrow-alt
+  - Label dùng fw-semibold thay fw-bold
+  - Nút xóa dòng dùng ký tự × thay vì <i class="bx bx-trash">
+  - Nút sửa dùng ✎ thay vì icon
+  - Bảng thead dùng table-light, font-size .75rem uppercase letter-spacing
+  - Sidebar cột phải: card Hành động + card Hướng dẫn nhanh (quick-tips)
+
+  1. TRANG TẠO LÔ MUA (lots/add.php — v2.0):
+     - Gộp HĐ + Lô mua vào 1 trang duy nhất (toggle "Có hợp đồng")
+     - Bỏ Điều khoản thanh toán & Thông tin bổ sung (quá chi tiết cho demo)
+     - Auto-generate mã lô, tên lô, mã HĐ, tên HĐ từ NCC + ngày
+     - Thêm khu vực tải file đính kèm (upload-dropzone, drag & drop)
+     - File lưu qua WordPress Media Library, ref trong lot_meta.attachments (JSON)
+     - Trạng thái mặc định = 1 (Hoạt động)
+
+  2. TRANG CHI TIẾT LÔ MUA (lots/detail.php — v2.0):
+     - Bỏ avatar-initial icon boxes, dùng text thuần
+     - Hiển thị user_info (display_name + email) từ get_userdata()
+     - Thêm upload-dropzone cho file đính kèm (như trang tạo)
+     - Cây batch đệ quy cha-con (parent_batch → sub-batch indent)
+     - Luôn lưu file vào lot_meta.attachments (không phụ thuộc has_contract)
+     - Link tạo chính sách: truyền lot_id qua URL
+
+  3. TRANG CHI TIẾT HỢP ĐỒNG (contracts/detail.php — v2.0):
+     - Đơn giản hóa: bỏ Điều khoản thanh toán, Thông tin bổ sung, Chính sách KM
+     - Bỏ khu vực upload (chỉ quản lý file trong trang lô mua)
+     - Thêm user_info từ contract AJAX get_one()
+     - Hiển thị lot liên kết dạng info-display read-only
+     - Tips ghi "File đính kèm quản lý trong trang lô mua"
+
+  4. TRANG TẠO CHÍNH SÁCH (policies/add.php — v2.0):
+     - Khi tạo từ lô mua (lot_id trong URL):
+       + Tự AJAX load thông tin lô → hiển thị card "Lô mua liên kết" (read-only)
+       + Tự sinh mã CS = "CS-{lot_code}", tên CS = "Chính sách mua — {lot_title}"
+       + Tự sinh mô tả = "Chính sách giá mua hàng cho {lot_title} (NCC: ...)"
+       + Mã CS bị disabled (không cho sửa vì tự động)
+       + contract_id, ledger_person_id resolve tự động từ lot (hidden fields)
+     - Bỏ dropdown chọn HĐ, NCC, Lô (không cần chọn lại khi đã có lot_id)
+     - Bỏ phần "Clone từ template" ở trang tạo (chuyển sang trang chi tiết)
+     - Bỏ trường Ngân sách, Mục tiêu tích lũy (đơn giản hóa)
+     - policy_is_template mặc định = 1 (Có — cho phép clone)
+     - Giữ nguyên modal 8 loại điều khoản (type 1-8) nhưng làm sạch icon
+     - Submit gửi purchase_policy_code từ hidden field khi disabled
+
+  FLOW TẠO MUA HÀNG CHUẨN (sau redesign):
+     NCC → Tạo lô mua (lots/add.php, toggle HĐ nếu cần)
+         → Chi tiết lô (lots/detail.php, upload file, thêm SP, xem batch)
+         → Tạo chính sách (policies/add.php?lot_id=X, tự điền tất cả)
+         → Chi tiết chính sách (policies/detail.php, thêm điều khoản, kích hoạt)
+         → Tạo phiếu mua hàng (áp chính sách vào phiếu)
