@@ -1200,6 +1200,178 @@ PHẦN F — GHI CHÚ PHÁT TRIỂN TƯƠNG LAI
 PHẦN G — CHANGELOG
 ================================================================================
 
+  13/03/2026 (v10) — HOÀN HÀNG VÀO ĐÚNG BATCH ĐÃ BÁN + FIX BATCH DISTRIBUTION
+  ─────────────────────────────────────────────────────────────────
+
+  MỤC TIÊU: "Bán đi như nào thì hoàn lại như vậy" — khi hoàn hàng, SP không
+  tracking phải quay về đúng batch đã bán. Đồng thời fix bug batch_distribution
+  không được cập nhật khi duyệt phiếu hoàn.
+
+  BUG GỐC (CRITICAL):
+    - Phiếu hoàn (type 11) có phiếu CON nhập kho (type 1) sinh tự động
+    - Items nằm ở phiếu CON, phiếu CHA KHÔNG có items
+    - handle_post_approve() gọi on_return_approved(parent_id)
+    - on_return_approved() query items WHERE local_ledger_id = parent_id → 0 kết quả
+    - → reduce_sold_in_distribution() KHÔNG BAO GIỜ chạy
+    - → batch_sold_quantity, distribution.sold KHÔNG giảm khi hoàn
+    - → Trang batch detail hiển thị sai (tồn kho không tăng, đã bán không giảm)
+
+  GIẢI PHÁP — 2 SỬA BACKEND + 1 SỬA FRONTEND:
+
+    1. Phase C.1 trong handle_post_approve() [class-tgs-ajax-ticket.php]
+       - Khi duyệt phiếu hoàn (type 11):
+         a) Tìm phiếu CON nhập kho (type 1) qua local_ledger_parent_id
+         b) Lấy items từ phiếu CON (không phải phiếu CHA)
+         c) Gán batch_id cho items chưa có:
+            → SP tracking: resolve từ lot → B2.batch_id
+            → SP không tracking: fifo_reverse (batch cũ nhất có sold > 0)
+         d) Gọi on_return_approved(child_ledger_id) thay vì parent_id
+
+    2. fifo_reverse_assign_batch_on_return() [class-tgs-ajax-ticket.php]
+       - Private static method mới (~80 dòng)
+       - Tìm leaf batches cũ nhất CÓ sold > 0 tại shop → gán batch_id
+       - Logic ngược với fifo_assign_batch_on_approve (tìm available > 0)
+       - Dùng cho phiếu hoàn cũ (trước v10) và phiếu thủ công không có phiếu cha
+
+    3. Batch allocation UI cho phiếu hoàn [ticket-create-base.js]
+       - isReturnTicket(): kiểm tra phiếu hoàn có phiếu cha
+       - hasBatchAllocation(): gộp isTransferTicket() || isReturnTicket()
+       - renderReturnBatchSuggestionRow(): hiển thị sub-row gợi ý batch
+         → Hiện bảng: Mã lô | HSD | Ngày nhập | Đã bán | Giá vốn TB | Hoàn SL
+         → Dữ liệu từ batch_cost_breakdown của phiếu bán gốc (không AJAX)
+       - autoAllocateReturnBatch(): tự động phân bổ hoàn vào đúng batch đã bán
+         → Ưu tiên batch cũ nhất trước (FIFO), tràn sang batch kế tiếp
+       - handleFormSubmit(): gửi batch_allocations cho cả phiếu hoàn
+       - handleQuantityInput(): auto-allocate lại khi thay đổi SL hoàn
+
+    4. Backend hỗ trợ [class-tgs-ajax-ticket-base.php]
+       - get_parent_ticket_products(): trả thêm sku, batch_id, batch_cost_breakdown
+         → batch_cost_breakdown: mảng [{batch_id, qty, unit_cost, batch_code,
+           exp_date, import_date, avg_cost, available_for_return}]
+         → available_for_return = distribution.sold (số đã bán, có thể hoàn vào)
+       - save_ticket_base(): thêm 'return' + 'damage' (v10b) vào danh sách
+         type xử lý batch_allocations
+         → Tách 1 item → N items theo batch (mỗi batch 1 item riêng biệt)
+
+  FLOW END-TO-END SAU FIX:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Tạo phiếu hoàn → chọn đơn bán → hiện batch allocation UI      │
+    │ 2. Auto-allocate vào đúng batch đã bán (FIFO cũ nhất trước)       │
+    │ 3. Lưu → save_ticket_base tách item theo batch → batch_id mỗi item│
+    │ 4. Duyệt CHA (type 11):                                          │
+    │    → Phase C.1: tìm child → gán batch_id (nếu chưa có) → gọi     │
+    │      on_return_approved(child_id) → reduce_sold_in_distribution   │
+    │ 5. Duyệt CON (type 1):                                           │
+    │    → Tăng tồn kho (local_product_quantity_no_tracking)            │
+    │    → on_import_approved() → SKIP (idempotent, qty đã có)          │
+    │ → Không double-count ✅                                           │
+    └─────────────────────────────────────────────────────────────────────┘
+
+  FILE THAY ĐỔI:
+    - class-tgs-ajax-ticket.php:
+      + handle_post_approve(): Phase C.1 cho CUSTOMER_RETURN (~60 dòng)
+      + fifo_reverse_assign_batch_on_return(): private static method (~80 dòng)
+    - class-tgs-ajax-ticket-base.php:
+      + get_parent_ticket_products(): thêm batch_cost_breakdown (~70 dòng)
+      + save_ticket_base(): thêm 'return' vào batch_allocations list
+    - ticket-create-base.js:
+      + isReturnTicket(), hasBatchAllocation() (helper methods)
+      + renderReturnBatchSuggestionRow() (~80 dòng UI)
+      + autoAllocateReturnBatch() (~40 dòng logic)
+      + Sửa addProductRow(), handleQuantityInput(), handleFormSubmit(),
+        getAvailableProducts() để hỗ trợ return batch allocation
+
+  KHÔNG ẢNH HƯỞNG:
+    - class-tgs-batch-distribution.php: KHÔNG SỬA (on_return_approved vẫn đúng,
+      chỉ sửa caller truyền đúng child_ledger_id)
+    - class-tgs-base-import-export.php: KHÔNG SỬA (đã có batch_id forwarding từ v7)
+    - Plugin tgs_pos: KHÔNG SỬA
+    - Không thêm bảng mới, không thay đổi cấu trúc bảng
+
+  ⚠️ FIX BUG REMAINDER OVER-ASSIGN (Phase C.0 + C.1 + C.2):
+    Khi batch allocation UI phân bổ 1 phần SL, save_ticket_base tách:
+    item1(batch_id=X) + remainder(no batch_id). Phase C.x cũ FIFO gán remainder
+    vào cùng batch → over-count (sold/damaged/returned vượt thực tế).
+    Fix: Tất cả Phase C.0/C.1/C.2 đều kiểm tra per-product: nếu đã có
+    item nào có batch_id (từ UI allocation) → skip FIFO cho remainder cùng SP.
+    Chỉ FIFO cho phiếu cũ/thủ công (TẤT CẢ items đều chưa có batch_id).
+    POS flow: an toàn (không dùng save_ticket_base → không có remainder).
+    Transfer flow: an toàn (không có Phase C.x → dùng collect_items_with_batch).
+
+  TỔNG: vẫn 17 bảng (không thêm bảng)
+
+
+  14/03/2026 (v10b) — HỦY HÀNG VÀO ĐÚNG BATCH + CẬP NHẬT distribution.damaged
+  ─────────────────────────────────────────────────────────────────
+
+  MỤC TIÊU: Khi tạo phiếu hủy hàng (type 6), SP không tracking phải chọn
+  batch cần hủy. Sau duyệt, batch detail hiển thị đúng "hư hỏng" (damaged).
+
+  BUG GỐC (tương tự return bug):
+    - Phiếu hủy (type 6) dùng no_auto_child_ticket → items trên parent
+    - Items được tạo KHÔNG CÓ batch_id (vì 'damage' không trong whitelist)
+    - on_damage_approved() query items → tất cả batch_id = NULL → skip hết
+    - → add_damaged_to_distribution() KHÔNG BAO GIỜ chạy
+    - → distribution.damaged = 0, batch detail hiển thị "hư hỏng: 0"
+
+  GIẢI PHÁP — 3 SỬA (2 BACKEND + 1 FRONTEND):
+
+    1. Batch allocation UI cho phiếu hủy [ticket-create-base.js]
+       - isDamageTicket(): kiểm tra phiếu hủy hàng
+       - hasBatchAllocation(): thêm || isDamageTicket()
+       - Dùng chung loadBatchSuggestions() (FEFO — batch gần HSD trước)
+       - Dùng chung autoAllocateFEFO() khi thay đổi SL
+       - UI giống phiếu chuyển kho: hiện tồn kho mỗi batch tại shop
+
+    2. Backend whitelist [class-tgs-ajax-ticket-base.php]
+       - Thêm 'damage' vào batch_allocations: in_array($ticket_type,
+         ['internal_export', 'internal_return', 'sale', 'return', 'damage'])
+       - no_auto_child_ticket branch đã có batch_id = $item_data['batch_id']
+         → sau split, mỗi item có batch_id đúng → insert thẳng
+
+    3. Phase C.2 trong handle_post_approve() [class-tgs-ajax-ticket.php]
+       - Khi duyệt phiếu hủy (type 6):
+         a) Lấy items từ parent ledger (no child)
+         b) Gán batch_id cho items chưa có:
+            → SP tracking: lot → B2.batch_id
+            → SP không tracking: fifo_assign (batch cũ nhất có available > 0)
+         c) on_damage_approved() chạy → add_damaged_to_distribution() đúng
+
+  FLOW END-TO-END:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │ 1. Tạo phiếu hủy → thêm SP → hiện batch suggestion (FEFO)        │
+    │ 2. Auto-allocate vào batch có tồn kho (ưu tiên gần HSD trước)    │
+    │ 3. Lưu → save_ticket_base tách item theo batch → batch_id mỗi item│
+    │ 4. Duyệt (type 6):                                               │
+    │    → Phase C.2: gán batch_id (nếu chưa có) → on_damage_approved()│
+    │    → add_damaged_to_distribution() → tăng damaged, giảm stock     │
+    │    → propagate_to_parent() → batch cha cũng cập nhật              │
+    └─────────────────────────────────────────────────────────────────────┘
+
+  KHÁC BIỆT VỚI RETURN (v10):
+    - Return: FIFO ngược (tìm sold > 0), hủy: FIFO xuôi (tìm available > 0)
+    - Return: cấu trúc 2 tầng CHA-CON, hủy: no_auto_child_ticket (1 tầng)
+    - Return: dữ liệu batch từ batch_cost_breakdown, hủy: AJAX batch suggestions
+    - Return: giảm sold, hủy: tăng damaged
+
+  ⚠️ FIX BUG PHASE C.2 OVER-ASSIGN (cùng ngày):
+    Khi user dùng batch allocation UI và chỉ phân bổ 1 phần (VD: 7/55),
+    save_ticket_base tách: item1 (qty=7, batch_id=X) + remainder (qty=48, no batch).
+    Phase C.2 cũ FIFO gán remainder vào cùng batch X → damaged=55 (SAI!).
+    Fix: kiểm tra per-product — nếu ĐÃ CÓ item nào có batch_id (từ UI),
+    thì skip FIFO cho remainder items cùng sản phẩm (intentionally unallocated).
+    Thêm: ticket-detail-base.js skip items có batch_info_source='sku_fallback'
+    khỏi Nhóm Batch (tránh duplicate rows từ SKU fallback).
+
+  FILE THAY ĐỔI:
+    - class-tgs-ajax-ticket.php: Phase C.2 cho DAMAGE (~70 dòng, có guard)
+    - class-tgs-ajax-ticket-base.php: thêm 'damage' vào whitelist (1 dòng)
+    - ticket-create-base.js: isDamageTicket() + sửa 3 điều kiện (~10 dòng)
+    - ticket-detail-base.js: skip fallback items từ Nhóm Batch (~5 dòng)
+
+  TỔNG: vẫn 17 bảng (không thêm bảng)
+
+
   09/03/2026 — ĐỔI reorder_threshold_percent → reorder_threshold_qty (C2b)
   ─────────────────────────────────────────────────────────────────
 
@@ -1823,14 +1995,34 @@ H1. Plugin tgs_shop_management (plugin gốc — quản lý shop + bán hàng)
   └──────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │ TGS_Ajax_Ticket (class-tgs-ajax-ticket.php, ~2660 dòng)                │
+  │ TGS_Ajax_Ticket (class-tgs-ajax-ticket.php, ~3380 dòng)                │
   │ ─ AJAX handler cho phiếu: tạo, sửa, duyệt, từ chối, xóa              │
   │ ─ approve() → handle_post_approve():                                   │
   │   • Type 1 (nhập):  gọi on_import_approved()                          │
-  │   • Type 2 (bán):   gọi on_export_approved()                          │
-  │   • Type 6 (hủy):   gọi on_damage_approved()                          │
-  │   • Type 11 (hoàn): gọi on_return_approved()                          │
+  │   • Type 2 (bán):   Phase C.0 (FIFO gán batch) → on_export_approved() │
+  │   • Type 6 (hủy):   Phase C.2 (FIFO gán batch) →                      │
+  │     on_damage_approved() (v10b)                                        │
+  │   • Type 11 (hoàn): Phase C.1 (tìm child → gán batch → gọi            │
+  │     on_return_approved(child_ledger_id)) (v10)                         │
   │   Tất cả guard bởi class_exists('TGS_Batch_Distribution')             │
+  │   ⚠️ Phase C.0/C.1/C.2 đều có REMAINDER GUARD: kiểm tra per-product   │
+  │   nếu đã có item có batch_id (UI) → skip FIFO cho remainder cùng SP   │
+  │                                                                        │
+  │ ─ Phase C.1 (v10): CUSTOMER_RETURN xử lý đặc biệt:                    │
+  │   → Items nằm ở phiếu CON (type 1), KHÔNG phải phiếu CHA (type 11)    │
+  │   → Tìm child import ledger qua local_ledger_parent_id                 │
+  │   → Gán batch_id cho items chưa có (tracking: lot→B2, non-track: FIFO) │
+  │   → Gọi on_return_approved(child_id) thay vì on_return_approved(parent)│
+  │                                                                        │
+  │ ─ Phase C.2 (v10b): DAMAGE xử lý tương tự Phase C.0:                   │
+  │   → Items nằm trên parent ledger (no_auto_child_ticket)                │
+  │   → SP tracking: lot → B2.batch_id                                     │
+  │   → SP không tracking: fifo_assign (batch cũ nhất có available > 0)    │
+  │   → Sau đó gọi on_damage_approved() → tăng damaged đúng batch          │
+  │                                                                        │
+  │ ─ fifo_reverse_assign_batch_on_return() (v10):                         │
+  │   → FIFO ngược: tìm batch cũ nhất CÓ sold > 0 → gán batch_id         │
+  │   → Dùng cho SP không tracking khi hoàn không qua batch allocation UI  │
   │                                                                        │
   │ ─ get_ledger_items() (v8): FALLBACK BATCH RESOLUTION                   │
   │   → Items chưa có batch_id được resolve tại read-time:                 │
@@ -1876,12 +2068,26 @@ H1. Plugin tgs_shop_management (plugin gốc — quản lý shop + bán hàng)
   └──────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │ TGS_Ajax_Ticket_Base (class-tgs-ajax-ticket-base.php)                  │
+  │ TGS_Ajax_Ticket_Base (class-tgs-ajax-ticket-base.php, ~2244 dòng)      │
   │ ─ AJAX base cho tạo phiếu: load products, search lots, batch suggest   │
   │ ─ get_batch_suggestions():                                             │
   │   → action: ticket_get_batch_suggestions                               │
   │   → Nhận product_sku, blog_id → gọi Distribution::get_batch_suggest..│
   │   → Trả về danh sách batch có hàng tại shop (FEFO)                    │
+  │                                                                        │
+  │ ─ get_parent_ticket_products() (v10):                                  │
+  │   → Trả thêm cho SP không tracking: sku, batch_id, batch_cost_breakdown│
+  │   → batch_cost_breakdown: [{batch_id, qty, unit_cost, batch_code,      │
+  │     exp_date, import_date, avg_cost, available_for_return}]            │
+  │   → available_for_return = distribution.sold tại shop                  │
+  │   → Frontend dùng data này để hiển thị batch allocation UI cho hoàn    │
+  │                                                                        │
+  │ ─ save_ticket_base() (v10):                                            │
+  │   → batch_allocations hỗ trợ: internal_export, internal_return, sale,  │
+  │     return, damage (v10b)                                              │
+  │   → Tách 1 item → N items theo batch khi có batch_allocations          │
+  │   → Remainder (SL chưa phân bổ) → 1 item không có batch_id            │
+  │     (Phase C.x sẽ skip FIFO cho remainder nếu cùng SP đã có UI batch) │
   └──────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────────────────────────────────────────────────────────────────┐
@@ -2195,7 +2401,11 @@ I1. batch_distribution — JSON quan trọng nhất hệ thống
     │ Duyệt phiếu nhập (1)   │ qty += remaining   │ on_import_approved()     │
     │ Duyệt phiếu bán (2)    │ sold += SL bán     │ on_export_approved()     │
     │ Duyệt phiếu hủy (6)    │ damaged += SL hủy  │ on_damage_approved()     │
+    │  ⚠️ (v10b) items cần    │ (Phase C.2 gán     │ Phase C.2 + FIFO assign  │
+    │  batch_id trước khi gọi │  batch_id trước)   │ nếu chưa có batch_id    │
     │ Duyệt phiếu hoàn (11)  │ sold -= SL hoàn    │ on_return_approved()     │
+    │  ⚠️ (v10) items nằm ở  │ (dùng child_id,    │ Phase C.1 tìm child     │
+    │  phiếu CON (type 1)    │  không phải parent)│ + fifo_reverse nếu cần  │
     │ Duyệt xuất chuyển kho  │ transferred_out++  │ on_transfer_export_..()  │
     │ Duyệt nhập chuyển kho  │ qty += SL nhận     │ on_transfer_import_..()  │
     └─────────────────────────┴────────────────────┴──────────────────────────┘
@@ -2600,6 +2810,115 @@ I9. Fallback batch resolution — batch_id tại read-time (v8 — 06/03)
     - batch_info_source giúp debug: 'lot_fallback' | 'sku_fallback' | absent (=direct)
 
 
+────────────────────────────────────────────────────────────────────────────────
+I10. Return → batch_distribution: Hoàn hàng vào đúng batch (v10 — 13/03)
+────────────────────────────────────────────────────────────────────────────────
+
+  ⚠️ ĐÂY LÀ PHẦN QUAN TRỌNG: giải thích TẠI SAO và CÁCH NÀO batch_distribution
+  được cập nhật khi hoàn hàng, cho CẢ 2 loại SP (tracking và không tracking).
+
+  ▸ VẤN ĐỀ (BUG trước v10):
+    Phiếu hoàn (type 11) có CẤU TRÚC 2 TẦNG:
+    - Phiếu CHA (type 11 = CUSTOMER_RETURN) — KHÔNG CÓ items
+    - Phiếu CON (type 1 = PURCHASE) — Items nằm ở đây (sinh tự động)
+
+    handle_post_approve() gọi on_return_approved(parent_id)
+    → on_return_approved() query items WHERE local_ledger_id = parent_id
+    → 0 items tìm thấy → reduce_sold_in_distribution() KHÔNG BAO GIỜ chạy
+    → batch_sold_quantity, distribution.sold KHÔNG giảm khi hoàn
+
+  ▸ GIẢI PHÁP (Phase C.1 trong handle_post_approve):
+
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │ 1. Tìm phiếu CON (type 1) qua local_ledger_parent_id                │
+    │ 2. Lấy items từ phiếu CON                                           │
+    │ 3. Gán batch_id cho items chưa có:                                   │
+    │    - SP tracking: lot → B2.batch_id                                  │
+    │    - SP không tracking: fifo_reverse (batch cũ nhất có sold > 0)     │
+    │ 4. Gọi on_return_approved(child_ledger_id)                           │
+    │    → reduce_sold_in_distribution() chạy đúng                         │
+    └────────────────────────────────────────────────────────────────────────┘
+
+  ▸ FIFO NGƯỢC (fifo_reverse_assign_batch_on_return):
+    - Khác FIFO bán (tìm available > 0), hàm này tìm sold > 0
+    - "Batch nào đã bán thì hoàn vào đó, ưu tiên cũ nhất"
+    - Dùng cho:
+      + Phiếu hoàn tạo trước v10 (chưa có batch_id trên items)
+      + Phiếu hoàn thủ công không qua batch allocation UI
+
+  ▸ BATCH ALLOCATION UI (frontend, ticket-create-base.js):
+    Khi tạo phiếu hoàn từ đơn bán, SP không tracking hiện bảng gợi ý batch:
+
+    ┌────────────┬──────────┬───────────┬──────────┬──────────┬──────────┐
+    │ Mã lô     │ HSD      │ Ngày nhập │ Đã bán   │ Giá vốn  │ Hoàn SL  │
+    ├────────────┼──────────┼───────────┼──────────┼──────────┼──────────┤
+    │ BATCH-001  │ 12/2026  │ 11/03     │ 5        │ 45.000   │ [input]  │
+    │ BATCH-002  │ 06/2027  │ 12/03     │ 3        │ 46.500   │ [input]  │
+    └────────────┴──────────┴───────────┴──────────┴──────────┴──────────┘
+    Nút "Tự động hoàn batch" → auto-allocate FIFO (cũ nhất trước)
+
+    - Dữ liệu từ batch_cost_breakdown của phiếu bán gốc (không AJAX)
+    - save_ticket_base() tách 1 item → N items theo batch_allocations
+    - Mỗi split item có batch_id riêng → on_return_approved() giảm sold đúng
+
+  ▸ KHÔNG BỊ DOUBLE-COUNT:
+    ┌──────────────────────┬────────────────────────────────────────────────┐
+    │ Duyệt CHA (type 11) │ Phase C.1 → on_return_approved(child_id)      │
+    │                      │ → giảm sold ✅                                 │
+    │                      │ Stock update: 0 items (skip) ✅                │
+    ├──────────────────────┼────────────────────────────────────────────────┤
+    │ Duyệt CON (type 1)  │ on_import_approved() → SKIP (qty >= remaining)│
+    │                      │ Stock update: tăng tồn kho ✅                  │
+    └──────────────────────┴────────────────────────────────────────────────┘
+
+
+I11. Damage → batch_distribution: Hủy hàng vào đúng batch (v10b — 14/03)
+────────────────────────────────────────────────────────────────────────────────
+
+  ⚠️ Tương tự I10 (Return), nhưng cho phiếu hủy hàng (type 6).
+  Sau khi sửa, batch detail page hiển thị đúng "hư hỏng" (damaged).
+
+  ▸ VẤN ĐỀ (BUG trước v10b):
+    Phiếu hủy (type 6) dùng no_auto_child_ticket → items trên parent.
+    Nhưng items KHÔNG CÓ batch_id (vì 'damage' không trong whitelist).
+    → on_damage_approved() query items → batch_id = NULL → skip hết
+    → add_damaged_to_distribution() KHÔNG chạy → damaged = 0
+
+  ▸ GIẢI PHÁP (Phase C.2 trong handle_post_approve):
+
+    ┌────────────────────────────────────────────────────────────────────────┐
+    │ 1. Items nằm trên parent ledger (không có child)                     │
+    │ 2. Gán batch_id cho items chưa có:                                   │
+    │    - SP tracking: lot → B2.batch_id                                  │
+    │    - SP không tracking: fifo_assign (batch cũ nhất có available > 0) │
+    │ 3. on_damage_approved($lid) → add_damaged_to_distribution()          │
+    │    → Tăng damaged, giảm stock (stock = qty - sold - damaged - ...)   │
+    └────────────────────────────────────────────────────────────────────────┘
+
+  ▸ KHÁC BIỆT VỚI RETURN (I10):
+    ┌──────────────────┬─────────────────────────┬──────────────────────────┐
+    │                  │ Return (type 11)        │ Damage (type 6)          │
+    ├──────────────────┼─────────────────────────┼──────────────────────────┤
+    │ Cấu trúc         │ CHA (11) + CON (1)      │ 1 tầng (no child)        │
+    │ Items nằm ở      │ Phiếu CON               │ Phiếu CHA (parent)       │
+    │ FIFO hướng       │ Ngược (sold > 0)        │ Xuôi (available > 0)     │
+    │ Trường cập nhật  │ sold -= SL              │ damaged += SL            │
+    │ Frontend data    │ batch_cost_breakdown     │ AJAX batch suggestions   │
+    │ Phase            │ C.1                     │ C.2                      │
+    └──────────────────┴─────────────────────────┴──────────────────────────┘
+
+  ▸ BATCH ALLOCATION UI (frontend, ticket-create-base.js):
+    Dùng chung với phiếu chuyển kho (loadBatchSuggestions / FEFO):
+
+    ┌────────────┬──────────┬───────────┬──────────┬──────────┐
+    │ Mã lô     │ HSD      │ Ngày nhập │ Tồn kho  │ Hủy SL   │
+    ├────────────┼──────────┼───────────┼──────────┼──────────┤
+    │ BATCH-001  │ 06/2026  │ 11/03     │ 15       │ [input]  │
+    │ BATCH-002  │ 12/2026  │ 12/03     │ 22       │ [input]  │
+    └────────────┴──────────┴───────────┴──────────┴──────────┘
+    Auto-allocate FEFO: batch gần hết hạn trước (phù hợp cho hủy hàng)
+
+
 ================================================================================
 PHẦN J — CÁC TÍNH NĂNG ĐÃ TRIỂN KHAI (tính đến 06/03/2026)
 ================================================================================
@@ -2783,6 +3102,8 @@ J-FUTURE. Tính năng chưa triển khai (roadmap)
   ❌ Sơ đồ tổ chức (wp_global_organization) — áp selling_policy theo vùng/miền
   ❌ Đa tiền tệ (SP nhập khẩu)
   ❌ Export/Import chính sách JSON
+  ✅ Hoàn hàng → batch: batch allocation UI + fix on_return_approved (v10)
+  ✅ Hủy hàng → batch: batch allocation UI + fix on_damage_approved (v10b)
   ❌ Hoàn đơn POS: POS gửi cancel_order → phiếu hoàn → nhập lại batch + lot ACTIVE
   ❌ Đồng bộ tồn kho POS ↔ WooCommerce (sàn online)
   ❌ Báo cáo selling_policy: hiệu quả KM, tỉ lệ chuyển đổi, ROI per campaign
