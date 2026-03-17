@@ -2,8 +2,36 @@
   KẾ HOẠCH TRIỂN KHAI PLUGIN: TGS LOT GENERATOR
   (Sinh mã định danh tự động + Quản lý biến thể sản phẩm)
   Ngày tạo: 17/03/2026
+  Cập nhật: 17/03/2026
   Tác giả: AI Assistant
-  Trạng thái: DRAFT — chờ duyệt trước khi code
+  Trạng thái: ✅ IMPLEMENTED v1.0.0 — đã triển khai xong toàn bộ 6 phase
+================================================================================
+
+  📋 LỊCH SỬ THAY ĐỔI:
+  ──────────────────────
+  17/03/2026 — v1.0.0:
+    • Triển khai xong 6 phase (plugin skeleton → DB → AJAX → 4 views → 4 JS → CSS)
+    • Review pass 1: fix 7 bugs (3 critical)
+    • Review pass 2: fix 5 bugs (XSS, N+1 query, global name collision)
+    • UX: dropdown z-index, auto-fill presets, chips chọn nhanh, toast notifications
+    • All-in-one workflow: modal thêm nhanh SP + biến thể ngay tại trang sinh mã
+    • Bootstrap Modal fix: getOrCreateInstance() tránh lỗi mở lần 2
+    • Duplicate variant prevention: unique check (product + blog + label + value)
+    • Detail page: row highlighting khi chọn, click hàng toggle checkbox
+    • Print config: toggle pill buttons (thay checkbox) — rõ ràng hơn
+    • Bỏ trường MFG date (không cần khi sinh mã)
+    • Toast notifications thay thế alert() toàn bộ plugin
+
+  ⚠️ KHÁC BIỆT SO VỚI KẾ HOẠCH BAN ĐẦU:
+    1. Bảng variants dùng local_product_name_id + source_blog_id (thay vì product_sku)
+       → Phù hợp multisite hơn, mỗi blog quản lý biến thể riêng
+    2. Trang create: 1 SP / 1 lần sinh (thay vì multi-line)
+       → Đơn giản hơn, tránh phức tạp — user sinh nhiều lần nếu cần
+    3. Thêm modal thêm nhanh SP & biến thể ngay tại trang create
+       → All-in-one workflow, không cần chuyển tab
+    4. Print config: toggle buttons trực tiếp (không modal)
+    5. SKU tự sinh: '1' + 8 random digits (thay vì SP-{timestamp})
+    6. Có hệ thống PRESETS cho biến thể (auto-fill label, chips, SKU suffix map)
 ================================================================================
 
 
@@ -68,58 +96,72 @@ PHẦN 1 — BẢNG DỮ LIỆU MỚI
 ────────────────────────────────────────────────────────────────────────────────
 1.1 wp_global_product_variants — Bảng biến thể sản phẩm (GLOBAL, 1 bảng duy nhất)
 ────────────────────────────────────────────────────────────────────────────────
+  ✅ ĐÃ TRIỂN KHAI — file: class-lot-generator-database.php
 
   Mô tả: Lưu TẤT CẢ giá trị biến thể của sản phẩm toàn hệ thống.
-         Mỗi bản ghi = 1 giá trị biến thể cụ thể (VD: "Size M", "Màu đỏ", "HSD 12/2026").
-         1 SP (SKU) có thể có NHIỀU biến thể (N dòng cùng product_sku).
+         Mỗi bản ghi = 1 giá trị biến thể cụ thể (VD: "Size M", "Màu đỏ").
+         1 SP có thể có NHIỀU biến thể (N dòng cùng local_product_name_id + blog).
          Dùng cho: gắn vào lot (B2), gắn vào batch (tương lai), hiển thị khi bán POS.
 
+  ⚠️ THAY ĐỔI so với kế hoạch: dùng local_product_name_id + source_blog_id
+     thay vì product_sku → phù hợp multisite, mỗi blog quản lý biến thể riêng.
+
+  CẤU TRÚC THỰC TẾ (đã triển khai):
+  ──────────────────────────────────
   variant_id                     BIGINT PK AUTO_INCREMENT
-  product_sku                    VARCHAR(255) NOT NULL        -- SKU sản phẩm (chung toàn hệ thống)
-  variant_type                   VARCHAR(100) NOT NULL        -- Loại biến thể: 'size', 'color', 'expiry', 'custom'
-  variant_label                  VARCHAR(255)                 -- Nhãn hiển thị: "Kích thước", "Màu sắc", "HSD", "Đợt nhập"
-  variant_value                  VARCHAR(500) NOT NULL        -- Giá trị: "M", "Đỏ", "12/2026", "Đợt 1 - T3/2026"
-  variant_code                   VARCHAR(100)                 -- Mã rút gọn (tùy chọn): "M", "RED", "2026-12"
-                                                              -- Dùng để ghép vào batch_code hoặc hiện trên label
-  variant_meta                   JSON                         -- Mở rộng: {"hex":"#FF0000"}, {"weight":"900g"}
-  sort_order                     INT DEFAULT 0                -- Thứ tự sắp xếp trong danh sách
+  local_product_name_id          BIGINT NOT NULL              -- FK → local_product_name (thay vì SKU)
+  source_blog_id                 BIGINT NOT NULL              -- Blog nào tạo biến thể này
+  variant_type                   VARCHAR(100) NOT NULL        -- 'size', 'color', 'expiry', 'flavor', 'weight', 'custom'
+  variant_label                  VARCHAR(255)                 -- Nhãn: "Kích cỡ", "Màu sắc", "Hương vị"...
+  variant_value                  VARCHAR(500) NOT NULL        -- Giá trị: "M", "Đỏ", "Socola"...
+  variant_sku_suffix             VARCHAR(100) DEFAULT ''      -- Hậu tố SKU: "-M", "-RED", "-CHO" (dùng ghép SKU)
+  variant_barcode_main           VARCHAR(255) DEFAULT ''      -- Barcode riêng cho biến thể (tùy chọn)
+  variant_price_adjustment       DECIMAL(15,2) DEFAULT 0      -- +/- giá so với SP gốc (VD: +50000 cho size XL)
+  variant_sort_order             INT DEFAULT 0                -- Thứ tự sắp xếp
+  variant_meta                   JSON                         -- Mở rộng: {"hex":"#FF0000"}, {"origin":"Japan"}
   is_active                      TINYINT DEFAULT 1            -- 1=đang dùng, 0=ngừng
-  user_id                        BIGINT
   is_deleted                     TINYINT DEFAULT 0
   deleted_at                     DATETIME
   created_at                     DATETIME
   updated_at                     DATETIME
 
   INDEX:
-    (product_sku, variant_type)          -- query "tất cả size của SKU X"
-    (product_sku, is_deleted, is_active) -- query "biến thể active của SKU X"
+    (local_product_name_id, source_blog_id, is_deleted)
+    (variant_type)
 
-  VÍ DỤ:
-    ┌────────────┬──────────┬──────────────┬──────────────┬──────────────┐
-    │ variant_id │ SKU      │ variant_type │ variant_label│ variant_value│
-    ├────────────┼──────────┼──────────────┼──────────────┼──────────────┤
-    │ 1          │ BIM-001  │ size         │ Kích thước   │ S            │
-    │ 2          │ BIM-001  │ size         │ Kích thước   │ M            │
-    │ 3          │ BIM-001  │ size         │ Kích thước   │ L            │
-    │ 4          │ BIM-001  │ color        │ Màu sắc      │ Trắng        │
-    │ 5          │ BIM-001  │ color        │ Màu sắc      │ Hồng         │
-    │ 6          │ SUA-DL01 │ expiry       │ HSD          │ 12/2026      │
-    │ 7          │ SUA-DL01 │ expiry       │ HSD          │ 06/2027      │
-    │ 8          │ AO-001   │ size         │ Kích thước   │ Freesize     │
-    │ 9          │ AO-001   │ color        │ Màu sắc      │ Đỏ           │
-    │ 10         │ AO-001   │ color        │ Màu sắc      │ Xanh         │
-    └────────────┴──────────┴──────────────┴──────────────┴──────────────┘
+  UNIQUE CHECK (code-level, trong save_variant):
+    Cùng (product_id + blog_id + variant_label + variant_value + is_deleted=0)
+    → Ngăn tạo trùng biến thể cho cùng 1 SP.
 
-  VARIANT_TYPE CỐ ĐỊNH (khởi tạo):
-    'size'    — Kích thước (S, M, L, XL, Freesize...)
-    'color'   — Màu sắc (Đỏ, Xanh, Trắng, Hồng...)
-    'expiry'  — Hạn sử dụng (12/2026, 06/2027...)
-    'custom'  — Tùy chỉnh (Đợt nhập, Mùi hương, Trọng lượng...)
+  VÍ DỤ THỰC TẾ (DB hiện tại):
+    ┌────────────┬─────────┬─────────┬──────────┬──────────────┬──────────┬────────────┐
+    │ variant_id │ prod_id │ blog_id │ type     │ label        │ value    │ sku_suffix │
+    ├────────────┼─────────┼─────────┼──────────┼──────────────┼──────────┼────────────┤
+    │ 1          │ 1       │ 2       │ size     │ Kích cỡ      │ S        │ -S         │
+    │ 2          │ 5       │ 2       │ expiry   │ Hạn sử dụng  │ 3 tháng  │ -3M        │
+    │ 3          │ 1       │ 2       │ flavor   │ Hương vị     │ Socola   │ -CHO       │
+    │ 4          │ 6       │ 2       │ color    │ Màu sắc      │ Trắng    │ -WHT       │
+    └────────────┴─────────┴─────────┴──────────┴──────────────┴──────────┴────────────┘
+
+  VARIANT_TYPE (6 loại, có PRESET chips + SKU map):
+    'size'    — Kích cỡ (S, M, L, XL, XXL, 28, 30, 32)
+    'color'   — Màu sắc (Trắng→-WHT, Đen→-BLK, Xanh dương→-BLU, Đỏ→-RED...)
+    'expiry'  — Hạn sử dụng (3 tháng→-3M, 6 tháng→-6M, 12 tháng→-12M...)
+    'flavor'  — Hương vị (Vani→-VAN, Dâu→-STR, Socola→-CHO, Matcha→-MAT...)
+    'weight'  — Trọng lượng (100g→-100G, 200g→-200G, 500g→-500G, 1kg→-1KG...)
+    'custom'  — Tùy chỉnh (không có preset)
 
   QUAN HỆ:
-    1 SKU → N biến thể (N dòng cùng product_sku)
+    1 SP (product_id + blog) → N biến thể
     1 biến thể ← N lot (wp_global_product_lots.variant_id)
     1 biến thể ← N batch (tương lai: wp_global_batch.variant_id)
+
+  KHẢ NĂNG MỞ RỘNG:
+    • variant_sku_suffix → ghép vào SKU gốc khi tạo batch: "BIM001-CHO" (Bỉm vị Socola)
+    • variant_price_adjustment → POS tự tính giá: giá_gốc + adjustment
+    • variant_barcode_main → quét barcode riêng cho từng biến thể (nếu có)
+    • variant_meta JSON → chứa thêm data mở rộng (hex màu, xuất xứ, weight...)
+    • Liên kết batch: wp_global_batch thêm variant_id → lọc batch theo biến thể
 
 
 ────────────────────────────────────────────────────────────────────────────────
@@ -185,27 +227,35 @@ PHẦN 1 — BẢNG DỮ LIỆU MỚI
 PHẦN 2 — CẤU TRÚC PLUGIN
 ================================================================================
 
-  📁 wp-content/plugins/tgs_lot_generator/
-  ├── tgs-lot-generator.php                  ← Entry point: hooks, routes, sidebar
+  📁 wp-content/plugins/tgs_lot_generator/         ✅ ĐÃ TRIỂN KHAI
+  ├── tgs-lot-generator.php             (~140 lines) ← Entry: constants, init, routes, sidebar, enqueue
   ├── includes/
-  │   ├── class-lot-generator-database.php   ← Tạo bảng variant + migration cột
-  │   ├── class-lot-generator-ajax.php       ← AJAX: CRUD biến thể + sinh mã + in + xóa
-  │   └── class-lot-generator-helpers.php    ← Helpers: sinh barcode, format data
+  │   ├── class-lot-generator-database.php (~120 lines) ← CREATE TABLE variants + migration variant_id
+  │   └── class-lot-generator-ajax.php     (~990 lines) ← 14 AJAX actions (chi tiết bên dưới)
   ├── admin-views/
   │   ├── variants/
-  │   │   └── list.php                       ← Quản lý biến thể (CRUD, tìm kiếm)
+  │   │   └── list.php                  (~180 lines) ← Quản lý biến thể (2-step UX + quick product modal)
   │   ├── generate/
-  │   │   ├── create.php                     ← ⭐ Trang sinh mã (màn hình chính)
-  │   │   └── detail.php                     ← ⭐ Chi tiết phiếu sinh mã (xem, in, xóa, tích)
+  │   │   ├── create.php                (~170 lines) ← ⭐ Sinh mã (all-in-one: search + modals + form)
+  │   │   ├── list.php                                ← DS phiếu sinh mã (phân trang, filter)
+  │   │   └── detail.php                (~130 lines) ← ⭐ Chi tiết phiếu (toolbar + toggle config + bảng)
   │   └── components/
-  │       └── print-labels.php               ← Template in barcode (tham khảo ticket-detail)
+  │       ├── modal-quick-product.php    (~160 lines) ← Modal thêm nhanh SP (2-col, pricing calc)
+  │       └── modal-quick-variant.php   (~85 lines)  ← Modal thêm nhanh biến thể (presets, chips)
   └── assets/
       ├── css/
-      │   └── lot-generator.css              ← Styles riêng
+      │   └── lot-generator.css         (~400 lines) ← Toàn bộ styles (dropdown, toast, row highlight...)
       └── js/
-          ├── variant-manager.js             ← JS quản lý biến thể
-          ├── lot-generate.js                ← JS trang tạo mã
-          └── lot-detail.js                  ← JS trang chi tiết (in, xóa, tích trạng thái)
+          ├── variant-manager.js        (~470 lines) ← CRUD biến thể + presets + chips + quick product modal
+          ├── lot-generate.js           (~530 lines) ← ⭐ All-in-one workflow (search → modal SP → modal variant → generate)
+          ├── lot-detail.js             (~250 lines) ← Chi tiết phiếu (row highlight, toggle config, bulk actions)
+          └── lot-list.js                             ← DS phiếu (phân trang, filter, link detail)
+
+  GHI CHÚ FILE:
+    • class-lot-generator-helpers.php đã KHÔNG tạo — logic helpers nằm trong ajax class
+    • print-labels.php đã KHÔNG tạo riêng — logic in barcode output trực tiếp từ AJAX
+    • Thêm 2 modal components (modal-quick-product.php, modal-quick-variant.php)
+    • CSS load cho tất cả views; JS load per-view (variant-manager / lot-generate / lot-detail / lot-list)
 
 
 ================================================================================
@@ -518,36 +568,70 @@ PHẦN 4 — MÀN HÌNH CHI TIẾT
 
 
 ================================================================================
-PHẦN 5 — DANH SÁCH AJAX ENDPOINTS
+PHẦN 5 — DANH SÁCH AJAX ENDPOINTS (ĐÃ TRIỂN KHAI: 14 actions)
 ================================================================================
 
   Tất cả dùng nonce: 'tgs_lot_gen_nonce'
+  Class: TGS_Lot_Generator_Ajax (~990 lines)
+  Đăng ký: TGS_Lot_Generator_Ajax::register() → add_action('wp_ajax_...')
 
-  ▸ BIẾN THỂ
+  ▸ A. BIẾN THỂ (3 actions)
   ┌────────────────────────────────────────┬──────────────────────────────┐
-  │ AJAX Action                            │ Mô tả                       │
-  ├────────────────────────────────────────┼──────────────────────────────┤
-  │ tgs_lot_gen_variant_list               │ DS biến thể theo SKU        │
-  │ tgs_lot_gen_variant_save               │ Thêm/sửa biến thể          │
-  │ tgs_lot_gen_variant_delete             │ Xóa mềm biến thể           │
-  │ tgs_lot_gen_search_products            │ Autocomplete SP (SKU/tên)   │
-  │ tgs_lot_gen_quick_add_product          │ Thêm nhanh SP mới           │
+  │ tgs_lot_gen_get_variants               │ DS biến thể theo product_id  │
+  │ tgs_lot_gen_save_variant               │ Thêm/sửa + duplicate check  │
+  │ tgs_lot_gen_delete_variant             │ Xóa mềm (is_deleted=1)      │
   └────────────────────────────────────────┴──────────────────────────────┘
 
-  ▸ SINH MÃ
+  ▸ B. TÌM KIẾM SẢN PHẨM (1 action)
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ tgs_lot_gen_search_products            │ Autocomplete (chỉ tracking=1)│
+  └────────────────────────────────────────┴──────────────────────────────┘
+  → Search: tên, SKU, barcode (LIKE %keyword%)
+  → Chỉ hiện SP có local_product_is_tracking = 1
+  → Trả về: id, name, SKU, barcode, unit, price, thumbnail, total_all
+
+  ▸ C. SINH MÃ (1 action)
   ┌────────────────────────────────────────┬──────────────────────────────┐
   │ tgs_lot_gen_generate                   │ Sinh mã + tạo phiếu (POST)  │
-  │ tgs_lot_gen_ledger_list                │ DS phiếu sinh mã (GET)      │
-  │ tgs_lot_gen_detail_get                 │ Chi tiết phiếu + lots (GET) │
+  └────────────────────────────────────────┴──────────────────────────────┘
+  → Input: product_id, blog_id, quantity, variant_id, lot_code, exp_date
+  → Sinh N barcode EAN-13 (reuse tgs_shop_generate_unique_barcode)
+  → INSERT N rows vào wp_global_product_lots (is_active=100)
+  → Tạo local_ledger (type=16) + local_ledger_item
+  → Trả về: ledger_id, ticket_code, lots_created
+
+  ▸ D. DANH SÁCH PHIẾU (1 action)
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ tgs_lot_gen_get_ledger_list            │ DS phiếu type=16 (phân trang)│
   └────────────────────────────────────────┴──────────────────────────────┘
 
-  ▸ QUẢN LÝ MÃ (trên trang detail)
+  ▸ E. CHI TIẾT PHIẾU (1 action)
   ┌────────────────────────────────────────┬──────────────────────────────┐
-  │ tgs_lot_gen_activate_lots              │ Đổi trạng thái → tồn kho    │
-  │ tgs_lot_gen_deactivate_lots            │ Đổi ngược → chờ dán         │
-  │ tgs_lot_gen_delete_lots                │ Xóa vĩnh viễn mã thừa      │
-  │ tgs_lot_gen_print_barcodes             │ In barcode labels            │
+  │ tgs_lot_gen_get_detail                 │ Phiếu + lots + variant batch │
   └────────────────────────────────────────┴──────────────────────────────┘
+  → Trả về: ledger info, stats, lots[] với variant data (JOIN 1 lần, ko N+1)
+
+  ▸ F. QUẢN LÝ MÃ (4 actions)
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ tgs_lot_gen_activate_lots              │ Bulk: 100 → 1 (tồn kho)     │
+  │ tgs_lot_gen_deactivate_lots            │ Bulk: 1 → 100 (đảo ngược)   │
+  │ tgs_lot_gen_delete_lots                │ Xóa mềm (chỉ status=100)    │
+  │ tgs_lot_gen_print_barcodes             │ In barcode (batch query)     │
+  └────────────────────────────────────────┴──────────────────────────────┘
+  → print_barcodes: trả về full HTML (JsBarcode, 35×22mm, 2/row)
+  → Options: show_price, show_variant, show_lot_info (toggle buttons)
+
+  ▸ G. THÊM NHANH (3 actions)
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ tgs_lot_gen_generate_sku               │ Sinh SKU: '1' + 8 random     │
+  │ tgs_lot_gen_quick_create_product       │ Tạo SP mới (tracking=1 auto) │
+  │ tgs_lot_gen_get_product_lots_count     │ Đếm lots theo SP (stats)     │
+  └────────────────────────────────────────┴──────────────────────────────┘
+  → generate_sku: '1' + 8 random digits, check unique, max 10 retries
+  → quick_create_product: INSERT local_product_name với tracking=1
+  → get_product_lots_count: trả total, in_stock, pending, generated
+
+  TỔNG: 14 AJAX ACTIONS
 
 
 ================================================================================
@@ -695,51 +779,47 @@ PHẦN 7 — THỨ TỰ TRIỂN KHAI (TỪNG BƯỚC)
   │ Ước tính: 2-3 giờ                                                      │
   └─────────────────────────────────────────────────────────────────────────┘
 
-  TỔNG ƯỚC TÍNH: 12-18 giờ code (2-3 ngày làm việc)
+  TỔNG ƯỚC TÍNH: 12-18 giờ code (2-3 ngày làm việc) → ✅ ĐÃ HOÀN THÀNH
 
 
 ================================================================================
-PHẦN 8 — KHẢ THI & ĐÁNH GIÁ
+PHẦN 8 — ĐÁNH GIÁ & TRẠNG THÁI HIỆN TẠI
 ================================================================================
 
-  ✅ KHẢ THI 100% — Lý do:
+  ✅ ĐÃ HOÀN THÀNH 100% PHASE 1-6:
 
-  1. KHÔNG THAY ĐỔI CODE CŨ:
-     - Plugin mới, hook vào sidebar qua filter/action có sẵn
-     - Dùng lại hàm sinh barcode có sẵn (tgs_shop_generate_unique_barcode)
-     - Dùng lại bảng có sẵn (local_ledger, local_ledger_item, global_product_lots)
-     - Chỉ thêm 1 bảng mới (variants) + 1 cột mới (variant_id trên lots)
+  ┌──────┬────────────────────────────────────┬───────────┐
+  │ Phase│ Nội dung                            │ Trạng thái│
+  ├──────┼────────────────────────────────────┼───────────┤
+  │ 1    │ Plugin skeleton + DB + sidebar      │ ✅ DONE   │
+  │ 2    │ Quản lý biến thể (CRUD)            │ ✅ DONE   │
+  │ 3    │ Trang sinh mã (all-in-one workflow) │ ✅ DONE   │
+  │ 4    │ DS phiếu sinh mã                    │ ✅ DONE   │
+  │ 5    │ Chi tiết phiếu (bulk actions)       │ ✅ DONE   │
+  │ 6    │ In barcode labels                   │ ✅ DONE   │
+  └──────┴────────────────────────────────────┴───────────┘
 
-  2. TƯƠNG THÍCH NGƯỢC:
-     - variant_id DEFAULT NULL → lot cũ không bị ảnh hưởng
-     - Ledger type=16 mới → không xung đột type 1-15 cũ
-     - local_product_lot_is_active=100 mới → không xung đột 0,1,2,3 cũ
-
-  3. THỰC TẾ & CẤP THIẾT:
-     - Kho đã có hàng nghìn SP, KHÔNG THỂ tạo lại phiếu mua
-     - Cần dán mã NGAY để quản lý → plugin này giải quyết đúng pain point
-     - Nhân viên kho chỉ cần: tìm SP → nhập SL → sinh mã → in → dán → tích
-     - Không cần hiểu batch, lô, hợp đồng → đơn giản hóa tối đa
-
-  4. MỞ RỘNG SAU:
-     - Phase 2+: liên kết batch (gán batch_id cho lot sau khi dán)
-     - Phase 2+: POS hiển thị biến thể khi bán
-     - Phase 2+: sinh mã cho web khác (chọn blog_id)
-     - Phase 2+: SP không tracking → biến thể chỉ để thống kê (không sinh lot)
-     - Phase 2+: báo cáo tốc độ bán theo biến thể
-
-  ⚠️ LƯU Ý:
-     - SL sinh mỗi lần nên giới hạn (≤ 2000) để tránh timeout
-     - Nếu sinh > 500 mã → nên dùng batch insert (1 query thay vì 500 query)
-     - In > 200 label 1 lần → JsBarcode có thể chậm → phân trang in
+  REVIEW & FIX:
+  ┌─────────┬────────────────────────────────────────────────────┬───────────┐
+  │ Lượt    │ Fix                                                │ Trạng thái│
+  ├─────────┼────────────────────────────────────────────────────┼───────────┤
+  │ Pass 1  │ 7 bugs: callable, IIFE, const, escape, returns    │ ✅ DONE   │
+  │ Pass 2  │ 5 bugs: XSS, N+1, duplicate display, naming       │ ✅ DONE   │
+  │ Pass 3  │ 1 bug: bootstrap.Modal getOrCreateInstance         │ ✅ DONE   │
+  │ DB fix  │ Xóa biến thể trùng (variant_id=5) + unique check  │ ✅ DONE   │
+  │ UX fix  │ Row highlight, toggle config, toast thay alert     │ ✅ DONE   │
+  │ UX fix  │ Bỏ MFG date (không cần khi sinh mã)               │ ✅ DONE   │
+  └─────────┴────────────────────────────────────────────────────┴───────────┘
 
 
 ================================================================================
-PHẦN 9 — CÁC BẢNG ẢNH HƯỞNG TÓM TẮT
+PHẦN 9 — CÁC BẢNG ẢNH HƯỞNG TÓM TẮT (THỰC TẾ)
 ================================================================================
 
   BẢNG MỚI:
     + wp_global_product_variants (Phần 1.1)
+      → Liên kết bằng local_product_name_id + source_blog_id
+      → KHÔNG dùng product_sku (thay đổi so với kế hoạch ban đầu)
 
   BẢNG SỬA (thêm cột):
     + wp_global_product_lots: thêm variant_id BIGINT DEFAULT NULL
@@ -750,30 +830,129 @@ PHẦN 9 — CÁC BẢNG ẢNH HƯỞNG TÓM TẮT
     - wp_{blog_id}_local_ledger_item (A4) — lưu SP + list_product_lots
     - wp_global_product_lots (B2) — INSERT lot mới (mã sinh tự động)
 
-  CONSTANT MỚI:
+  CONSTANT:
     TGS_LEDGER_TYPE_LOT_GENERATE = 16
 
-  TRẠNG THÁI MỚI (local_product_lot_is_active):
-    100 = Tự động sinh, chưa dán (MỚI)
-    1   = Tồn kho (đã dán, đã có sẵn)
+  TRẠNG THÁI LOT (local_product_lot_is_active):
+    100 = Vừa sinh, chưa dán (đã sinh / generated)
+    1   = Tồn kho (đã dán, đã kích hoạt)
     0   = Đã bán
     2   = Chờ duyệt (flow cũ)
     3   = Đã hủy
 
+  CÔNG THỨC GIÁ:
+    price_before_tax = price_after_tax / (1 + tax/100)
+    Default VAT = 8%
+
+  SKU FORMAT:
+    '1' + 8 random digits (VD: 163258996)
+    Check unique lên DB, tối đa 10 lần thử
+
 
 ================================================================================
-PHẦN 10 — FILE TEXT NÀY DÙNG ĐỂ LÀM GÌ
+PHẦN 10 — KHẢ NĂNG MỞ RỘNG & ROADMAP TƯƠNG LAI
+================================================================================
+
+  💡 VÌ SAO RẤT DỄ PHÁT TRIỂN:
+
+  Plugin được thiết kế với nguyên tắc:
+  1. Dùng chung cơ sở dữ liệu (lots, ledger, product) — không silo
+  2. variant_id là FK tùy chọn trên lot — lot cũ (NULL) vẫn hoạt động
+  3. Mỗi SP vẫn chỉ có 1 local_product_name (1 SKU) — biến thể là metadata bổ sung
+  4. Ledger type=16 tách biệt — không ảnh hưởng flow mua hàng/bán hàng
+
+  ──────────────────────────────────────────────────────────────────────
+  PHASE 7+: Kết hợp với BATCH (Phiếu mua hàng)
+  ──────────────────────────────────────────────────────────────────────
+
+  Hiện tại:
+    • Lot sinh từ plugin → variant_id đã có sẵn trên wp_global_product_lots
+    • Mỗi lot đã có: product_id + variant_id + barcode + status
+
+  Mở rộng batch:
+    • Khi tạo phiếu mua hàng (batch), có thể chọn variant cho batch_item
+    • VD: Mua 100 hộp Bỉm Moony Size M → batch_item.variant_id = 3
+    • Nhập kho → sinh lot tự động với variant_id kế thừa từ batch
+    • Thống kê: "Mua bao nhiêu Size M vs Size L?" → GROUP BY variant_id
+
+  Cách thực hiện:
+    1. Thêm variant_id vào batch_item (ALTER TABLE)
+    2. UI batch: thêm dropdown biến thể (reuse load_variants logic)
+    3. Nhập kho: tự gán variant_id cho lot mới
+    → Rất đơn giản vì variants table + AJAX đã có sẵn!
+
+  ──────────────────────────────────────────────────────────────────────
+  PHASE 8+: THỐNG KÊ THEO BIẾN THỂ
+  ──────────────────────────────────────────────────────────────────────
+
+  Vì mỗi lot đã gắn variant_id, có thể query:
+
+    • Tồn kho theo biến thể:
+      SELECT v.variant_label, v.variant_value, COUNT(*) as qty
+      FROM wp_global_product_lots l
+      JOIN wp_global_product_variants v ON l.variant_id = v.variant_id
+      WHERE l.local_product_lot_is_active = 1
+      GROUP BY l.variant_id
+      → Kết quả: "Bỉm Size S: 28 | Size M: 45 | Size L: 20"
+
+    • Tốc độ bán theo biến thể:
+      SELECT v.variant_value, COUNT(*) as sold
+      FROM wp_global_product_lots l
+      JOIN wp_global_product_variants v ON l.variant_id = v.variant_id
+      WHERE l.local_product_lot_is_active = 0  -- đã bán
+      GROUP BY l.variant_id
+      → Biết Size M bán nhanh hơn Size S → nhập thêm
+
+    • Báo cáo doanh thu theo biến thể:
+      SELECT v.variant_value, SUM(l.global_product_lot_price) as revenue
+      → Hương vị Socola bán 12M, Vani bán 8M → ưu tiên nhập Socola
+
+  ──────────────────────────────────────────────────────────────────────
+  PHASE 9+: POS HIỂN THỊ BIẾN THỂ KHI BÁN
+  ──────────────────────────────────────────────────────────────────────
+
+  Khi bán hàng:
+    • Quét barcode lot → biết ngay SP + biến thể:
+      "Bỉm Moony — Size M — 350,000đ"
+    • Gõ tên SP → POS hiện dropdown biến thể:
+      BIM-001: Size S (28 tồn) | Size M (45 tồn) | Size L (20 tồn)
+    • Chọn biến thể → lọc lot → quét/chọn → bán
+    • variant_price_adjustment → POS tự cộng/trừ giá
+
+  ──────────────────────────────────────────────────────────────────────
+  PHASE 10+: MỞ RỘNG KHÁC
+  ──────────────────────────────────────────────────────────────────────
+
+    • Sinh mã cho web khác (chọn blog_id — hệ thống 650 stores)
+    • SP không tracking → biến thể chỉ để thống kê (không sinh lot)
+    • Import biến thể từ file Excel (hàng trăm SP cùng lúc)
+    • Multi-variant per lot: 1 lot gắn nhiều biến thể (cần bảng trung gian)
+    • QR code thay EAN-13 (chứa nhiều data: SP + variant + HSD + giá)
+    • Mobile app scan: nhân viên kho quét → kích hoạt lot trực tiếp
+    • API public: cho bên thứ 3 query tồn kho theo biến thể
+
+  TẤT CẢ đều dựa trên 1 nền tảng:
+    → wp_global_product_variants (biến thể)
+    → wp_global_product_lots.variant_id (liên kết)
+    → local_product_name (vẫn chỉ 1 SKU / SP)
+    → Không cần thay đổi cấu trúc DB hiện tại!
+
+
+================================================================================
+PHẦN 11 — FILE NÀY DÙNG ĐỂ LÀM GÌ
 ================================================================================
 
   1. Khi bắt đầu code → đọc file này để hiểu toàn bộ kế hoạch
   2. Khi hết token, hỏi lại AI → gửi file này → AI hiểu ngay context
-  3. Khi review → so sánh code với kế hoạch
-  4. Khi mở rộng → thêm phase mới vào PHẦN 7
+  3. Khi review → so sánh code với kế hoạch + phần đã thay đổi
+  4. Khi mở rộng → xem PHẦN 10 để biết roadmap
   5. Khi có bug → tra PHẦN 4-5 để hiểu luồng
+  6. Khi kết hợp batch/thống kê → xem PHẦN 10 query mẫu
 
-  LỆNH BẮT ĐẦU (nói với AI):
-    "Đọc file ke_hoach_plugin_sinh_ma_dinh_danh.text, triển khai Phase X"
+  LỆNH CHO AI (nếu hết token / prompt mới):
+    "Đọc file ke_hoach_plugin_sinh_ma_dinh_danh.text để nắm context,
+     sau đó giúp tôi [mô tả yêu cầu]"
 
 ================================================================================
-  HẾT KẾ HOẠCH — CHỜ DUYỆT
+  ✅ PLUGIN ĐÃ HOÀN THÀNH v1.0.0 — SẴN SÀNG SỬ DỤNG
 ================================================================================
