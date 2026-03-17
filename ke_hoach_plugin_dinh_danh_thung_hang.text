@@ -1,0 +1,259 @@
+================================================================================
+  KẾ HOẠCH PLUGIN: TGS BOX MANAGER — Định danh thùng hàng
+  Status: IMPLEMENTING v1.0.0
+  Created: 17/03/2026
+  Author: TGS Dev Team
+================================================================================
+
+▸ LỊCH SỬ THAY ĐỔI:
+  ─────────────────────────────────────────────────────────────────────────────
+  17/03/2026 — v1.0.0 — Khởi tạo plugin, thiết kế DB, triển khai MVP
+  ─────────────────────────────────────────────────────────────────────────────
+
+================================================================================
+ PHASE 1 — MỤC TIÊU & TỔNG QUAN
+================================================================================
+
+1.1 BÀI TOÁN:
+   - Hệ thống POS "Thế Giới Sữa" 650+ shop WordPress Multisite
+   - Mỗi sản phẩm đã có mã định danh riêng (wp_global_product_lots)
+   - Thực tế: hàng đóng trong thùng lớn (carton, pallet, khay...) chứa
+     nhiều sản phẩm bên trong (có thể 200+ mã/thùng)
+   - Cần: định danh cho THÙNG để scan 1 lần → xử lý tất cả mã bên trong
+
+1.2 GIÁ TRỊ MANG LẠI:
+   ✅ Bán nhanh: quét 1 mã thùng → xuất/bán toàn bộ SP bên trong
+   ✅ Kiểm kho nhanh: scan thùng → biết ngay số lượng bên trong
+   ✅ Chuyển kho nhanh: chuyển 1 thùng = chuyển N sản phẩm
+   ✅ Đóng gói linh hoạt: thùng đồng nhất (1 loại SP) hoặc hỗn hợp
+   ✅ Truy xuất nguồn gốc: biết chính xác mã nào trong thùng nào
+
+1.3 QUAN HỆ VỚI HỆ THỐNG HIỆN TẠI:
+   ─────────────────────────────────────────────────────────────────────
+   wp_global_box_manager          ← BẢNG MỚI (plugin này)
+        ↑ box_id
+        │
+   wp_global_product_lots.global_box_manager_id  ← CỘT ĐÃ CÓ SẴN
+   ─────────────────────────────────────────────────────────────────────
+   → Không cần migration thêm cột, chỉ cần tạo bảng master mới.
+
+================================================================================
+ PHASE 2 — THIẾT KẾ DATABASE
+================================================================================
+
+2.1 BẢNG: wp_global_box_manager
+   → GLOBAL (không prefix site), DUY NHẤT 1 bảng toàn multisite
+   → Tạo trong class-tgs-database.php (tgs_shop_management)
+
+   ┌──────────────────────────────┬──────────────────┬──────────────────────┐
+   │ Cột                          │ Kiểu             │ Ghi chú              │
+   ├──────────────────────────────┼──────────────────┼──────────────────────┤
+   │ box_id                       │ BIGINT PK AI     │ ID thùng             │
+   │ box_code                     │ VARCHAR(100) UQ  │ Mã thùng: 2+8 digits│
+   │ box_barcode                  │ VARCHAR(255)     │ Barcode vật lý       │
+   │ box_title                    │ VARCHAR(500)     │ Tên mô tả thùng     │
+   │ box_type                     │ TINYINT DEF 1    │ 1=carton 2=pallet    │
+   │                              │                  │ 3=khay 4=bao 5=other │
+   │ box_capacity                 │ INT DEF 0        │ Sức chứa (0=ko giới │
+   │                              │                  │ hạn)                 │
+   │ box_actual_qty               │ INT DEF 0        │ SL thực tế (cache)   │
+   │ product_sku                  │ VARCHAR(255)     │ SKU SP chính (NULL   │
+   │                              │                  │ nếu hỗn hợp)        │
+   │ local_product_name_id        │ BIGINT           │ ID SP local          │
+   │ variant_id                   │ BIGINT           │ Biến thể (nếu có)   │
+   │ source_blog_id               │ BIGINT           │ Shop tạo thùng       │
+   │ current_blog_id              │ BIGINT           │ Shop đang giữ        │
+   │ destination_blog_id          │ BIGINT           │ Shop đích (chuyển)   │
+   │ box_status                   │ TINYINT DEF 0    │ 0=draft 1=packing    │
+   │                              │                  │ 2=sealed 3=in_transit│
+   │                              │                  │ 4=delivered 5=opened │
+   │                              │                  │ 99=archived          │
+   │ sealed_at                    │ DATETIME         │ Thời điểm niêm phong│
+   │ shipped_at                   │ DATETIME         │ Thời điểm vận chuyển │
+   │ delivered_at                 │ DATETIME         │ Thời điểm giao       │
+   │ opened_at                    │ DATETIME         │ Thời điểm mở         │
+   │ box_note                     │ TEXT             │ Ghi chú              │
+   │ box_meta                     │ JSON             │ Meta: weight, dim... │
+   │ barcode_url                  │ TEXT             │ URL hình barcode     │
+   │ qr_code_url                  │ TEXT             │ URL hình QR          │
+   │ user_id                      │ INTEGER          │ Người tạo            │
+   │ is_deleted                   │ TINYINT DEF 0    │ Soft delete          │
+   │ deleted_at                   │ DATETIME         │                      │
+   │ created_at                   │ DATETIME         │                      │
+   │ updated_at                   │ DATETIME         │                      │
+   └──────────────────────────────┴──────────────────┴──────────────────────┘
+
+   INDEX:
+   - UNIQUE (box_code)
+   - KEY (box_barcode)
+   - KEY (box_status)
+   - KEY (product_sku)
+   - KEY (source_blog_id)
+   - KEY (current_blog_id)
+   - KEY (is_deleted)
+
+2.2 BOX CODE FORMAT:
+   - Chuẩn EAN-13: Prefix '2' + 11 random digits + check digit = 13 chữ số
+   - VD: 2491827653048
+   - Phân biệt với mã định danh SP (prefix random 1-9)
+   - Check digit theo chuẩn EAN-13 (odd×1, even×3)
+   - Unique kiểm tra trên CẢ bảng box lẫn product_lots trước khi insert
+   - In barcode dạng EAN-13 (giống mã định danh SP)
+
+2.3 BOX STATUS FLOW:
+   ┌────────┐    ┌─────────┐    ┌────────┐    ┌────────────┐    ┌───────────┐    ┌────────┐
+   │ draft  │───►│ packing │───►│ sealed │───►│ in_transit │───►│ delivered │───►│ opened │
+   │  (0)   │    │   (1)   │    │  (2)   │    │    (3)     │    │   (4)     │    │  (5)   │
+   └────────┘    └─────────┘    └────────┘    └────────────┘    └───────────┘    └────────┘
+                                                                                      │
+                                                                                 ┌────────────┐
+                                                                                 │  archived  │
+                                                                                 │    (99)    │
+                                                                                 └────────────┘
+
+================================================================================
+ PHASE 3 — PLUGIN STRUCTURE
+================================================================================
+
+3.1 THƯ MỤC:
+   wp-content/plugins/tgs_box_manager/
+   ├── tgs-box-manager.php              (~140 dòng)  Bootstrap
+   ├── includes/
+   │   └── class-box-manager-ajax.php   (~700 dòng)  AJAX handlers
+   ├── admin-views/
+   │   ├── box-create.php               (~120 dòng)  Tạo thùng
+   │   ├── box-list.php                 (~100 dòng)  Danh sách
+   │   └── box-detail.php               (~170 dòng)  Chi tiết + quản lý
+   └── assets/
+       ├── js/
+       │   ├── box-create.js            (~200 dòng)
+       │   ├── box-list.js              (~150 dòng)
+       │   └── box-detail.js            (~350 dòng)
+       └── css/
+           └── box-manager.css          (~200 dòng)
+
+3.2 CONSTANTS:
+   TGS_BOX_MGR_VERSION      = '1.0.0'
+   TGS_BOX_MGR_DIR          = plugin_dir_path(__FILE__)
+   TGS_BOX_MGR_URL          = plugin_dir_url(__FILE__)
+   TGS_BOX_MGR_VIEWS        = TGS_BOX_MGR_DIR . 'admin-views/'
+   TGS_TABLE_GLOBAL_BOX_MANAGER = 'wp_global_box_manager'
+
+3.3 ROUTES (hook vào tgs_shop_dashboard_routes):
+   box-create   → admin-views/box-create.php
+   box-list     → admin-views/box-list.php
+   box-detail   → admin-views/box-detail.php
+
+3.4 SIDEBAR MENU (hook vào tgs_shop_sidebar_menu):
+   📦 Định danh thùng hàng
+     ├── Tạo thùng mới    (box-create)
+     └── Danh sách thùng   (box-list)
+   (box-detail được truy cập từ list, không hiện trên sidebar)
+
+================================================================================
+ PHASE 4 — AJAX ENDPOINTS
+================================================================================
+
+4.1 DANH SÁCH ACTIONS (10 actions):
+
+   ┌──────┬───────────────────────────────┬──────────────────────────────────┐
+   │ Nhóm │ Action                        │ Mô tả                          │
+   ├──────┼───────────────────────────────┼──────────────────────────────────┤
+   │  A   │ tgs_box_create_boxes          │ Tạo N thùng mới (bulk)         │
+   │  A   │ tgs_box_update_info           │ Cập nhật title/note/meta       │
+   │  A   │ tgs_box_delete                │ Soft delete thùng              │
+   ├──────┼───────────────────────────────┼──────────────────────────────────┤
+   │  B   │ tgs_box_get_list              │ DS thùng + filter + phân trang │
+   │  B   │ tgs_box_get_detail            │ Chi tiết thùng + nội dung      │
+   ├──────┼───────────────────────────────┼──────────────────────────────────┤
+   │  C   │ tgs_box_add_items             │ Gán mã định danh vào thùng     │
+   │  C   │ tgs_box_remove_items          │ Gỡ mã định danh khỏi thùng    │
+   │  C   │ tgs_box_search_available_lots │ Tìm mã chưa thuộc thùng nào   │
+   ├──────┼───────────────────────────────┼──────────────────────────────────┤
+   │  D   │ tgs_box_update_status         │ Đổi trạng thái thùng           │
+   │  D   │ tgs_box_print_label           │ Dữ liệu in nhãn thùng         │
+   └──────┴───────────────────────────────┴──────────────────────────────────┘
+
+================================================================================
+ PHASE 5 — GIAO DIỆN (UX)
+================================================================================
+
+5.1 TRANG TẠO THÙNG (box-create):
+   - Nhập: loại thùng, sức chứa, tên thùng, sản phẩm (optional), ghi chú
+   - Số lượng thùng cần tạo
+   - Bấm "Tạo thùng" → sinh N mã thùng
+   - Hiện bảng kết quả → bấm vào từng thùng để xem chi tiết
+
+5.2 TRANG DANH SÁCH (box-list):
+   - Filter: trạng thái, sản phẩm, keyword
+   - Bảng: mã thùng, tên, loại, trạng thái, SL/sức chứa, shop, ngày tạo
+   - Click row → đi tới chi tiết
+
+5.3 TRANG CHI TIẾT (box-detail):
+   - Card thông tin thùng (code, title, status, qty)
+   - Card toolbar: chuyển trạng thái, in nhãn
+   - Thêm mã vào thùng:
+     • Cách 1: Scan barcode (input + enter)
+     • Cách 2: Tìm & chọn nhanh (autocomplete → checkbox → thêm)
+   - Bảng nội dung: danh sách mã định danh bên trong
+   - Gỡ mã: checkbox chọn → bấm gỡ
+
+================================================================================
+ PHASE 6 — TÍCH HỢP HỆ THỐNG
+================================================================================
+
+6.1 BẢNG MỚI: tạo trong class-tgs-database.php (tgs_shop_management)
+6.2 MENU: cập nhật tgs_menu_customizer (class-menu-parser.php)
+6.3 BACKUP: cập nhật tgs_backup_restore (class-tgs-backup-engine.php)
+6.4 FK: wp_global_product_lots.global_box_manager_id → wp_global_box_manager.box_id
+
+================================================================================
+ PHASE 7 — TIẾN ĐỘ
+================================================================================
+
+   ┌────┬────────────────────────────────────────────┬──────────┐
+   │ #  │ Hạng mục                                   │ Status   │
+   ├────┼────────────────────────────────────────────┼──────────┤
+   │  1 │ Thiết kế DB + kế hoạch                     │ ✅ Done  │
+   │  2 │ Tạo bảng trong class-tgs-database.php      │ 🔄       │
+   │  3 │ Plugin bootstrap (tgs-box-manager.php)     │ 🔄       │
+   │  4 │ AJAX handler (class-box-manager-ajax.php)  │ 🔄       │
+   │  5 │ Views (create, list, detail)               │ 🔄       │
+   │  6 │ JS files (create, list, detail)            │ 🔄       │
+   │  7 │ CSS                                        │ 🔄       │
+   │  8 │ Tích hợp menu + backup                     │ 🔄       │
+   │  9 │ Test & fix                                 │ ⬜       │
+   │ 10 │ Mở rộng POS integration                    │ ⬜       │
+   └────┴────────────────────────────────────────────┴──────────┘
+
+================================================================================
+ PHASE 8 — MỞ RỘNG TƯƠNG LAI
+================================================================================
+
+8.1 POS INTEGRATION:
+   - Scan box_code tại POS → auto add toàn bộ SP vào giỏ hàng
+   - Quick sell: 1 scan = bán hết thùng
+
+8.2 TRANSFER:
+   - Chuyển thùng giữa shop → auto chuyển toàn bộ mã bên trong
+   - Cập nhật current_blog_id + destination_blog_id
+
+8.3 INVENTORY:
+   - Kiểm kho: scan thùng → đối chiếu SL thực tế vs hệ thống
+   - Báo cáo thùng theo shop, theo SP, theo trạng thái
+
+8.4 NESTING (tương lai):
+   - Thùng trong thùng (pallet chứa nhiều carton)
+   - Thêm parent_box_id nếu cần
+
+================================================================================
+ PHASE 9 — CÁCH SỬ DỤNG FILE NÀY
+================================================================================
+
+Khi prompt lại (hết token / phiên mới):
+1. Attach file này
+2. Nói: "Tiếp tục triển khai plugin tgs_box_manager theo file kế hoạch"
+3. AI sẽ đọc Phase 7 → biết cần làm gì tiếp
+4. Cập nhật status Phase 7 sau mỗi bước hoàn thành
+
+================================================================================
