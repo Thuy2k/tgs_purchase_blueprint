@@ -22,6 +22,36 @@
     • Bỏ trường MFG date (không cần khi sinh mã)
     • Toast notifications thay thế alert() toàn bộ plugin
 
+  17/03/2026 — v1.1.0 (tích hợp tgs_box_manager):
+    • ĐỔI TÊN MENU: "Sinh mã định danh" → "Định danh sản phẩm"
+      - Menu cha: Định danh sản phẩm
+      - Menu con: Tạo mã định danh (thay Sinh mã mới)
+      - Menu con: DS định danh sản phẩm (thay DS phiếu sinh mã)
+      - Tiêu đề trang create: Tạo mã định danh sản phẩm
+      - Tiêu đề trang list: Danh sách định danh sản phẩm
+      - Tiêu đề trang detail: Chi tiết phiếu định danh sản phẩm
+      - Đã đồng bộ cả tgs_menu_customizer (class-menu-parser.php)
+    • TRANG CHI TIẾT — Thêm cột "Thùng" trong bảng mã:
+      - SQL JOIN wp_global_box_manager lấy box_code
+      - Hiển thị mã thùng (code) nếu lot đã gắn, trống nếu chưa
+      - Cập nhật colspan 8 → 9
+    • TRANG CHI TIẾT — Nút "Gắn vào thùng":
+      - Nút mới trên toolbar: "Gắn vào thùng (N)"
+      - Modal Bootstrap: ô tìm thùng (autocomplete), card thùng đã chọn,
+        hiển thị sức chứa còn trống, nút xác nhận
+      - Gọi tgs_box_search_boxes (tìm thùng còn chỗ) + tgs_box_add_items
+      - Logic bảo vệ: mã đã gắn thùng rồi → KHÔNG cho gắn lại
+        → Toast: "Vào trang chi tiết thùng để sửa nhé!"
+      - Chỉ gắn mã chưa có thùng (data-box-id=0)
+      - canAssign filter: deleted=0 AND box-id=0
+      - Truyền boxNonce (tgs_box_mgr_nonce) vào JS qua wp_localize_script
+    • TRANG TẠO MÃ — HSD theo dd/mm/yyyy:
+      - Thay <input type="date"> bằng text input dd/mm/yyyy + hidden date picker
+      - User gõ số → tự chèn dấu / (auto-format)
+      - Bấm icon lịch → chọn ngày → fill ngược dd/mm/yyyy
+      - Hidden input #expDate luôn lưu YYYY-MM-DD cho AJAX
+      - CSS ẩn text của native picker, chỉ giữ icon calendar
+
   ⚠️ KHÁC BIỆT SO VỚI KẾ HOẠCH BAN ĐẦU:
     1. Bảng variants dùng local_product_name_id + source_blog_id (thay vì product_sku)
        → Phù hợp multisite hơn, mỗi blog quản lý biến thể riêng
@@ -236,9 +266,9 @@ PHẦN 2 — CẤU TRÚC PLUGIN
   │   ├── variants/
   │   │   └── list.php                  (~180 lines) ← Quản lý biến thể (2-step UX + quick product modal)
   │   ├── generate/
-  │   │   ├── create.php                (~170 lines) ← ⭐ Sinh mã (all-in-one: search + modals + form)
-  │   │   ├── list.php                                ← DS phiếu sinh mã (phân trang, filter)
-  │   │   └── detail.php                (~130 lines) ← ⭐ Chi tiết phiếu (toolbar + toggle config + bảng)
+  │   │   ├── create.php                (~160 lines) ← ⭐ Tạo mã định danh SP (search + modals + form + EXP dd/mm/yyyy)
+  │   │   ├── list.php                                ← Danh sách định danh SP (phân trang, filter)
+  │   │   └── detail.php                (~185 lines) ← ⭐ Chi tiết phiếu (toolbar + toggle config + bảng + modal gắn thùng)
   │   └── components/
   │       ├── modal-quick-product.php    (~160 lines) ← Modal thêm nhanh SP (2-col, pricing calc)
   │       └── modal-quick-variant.php   (~85 lines)  ← Modal thêm nhanh biến thể (presets, chips)
@@ -247,8 +277,8 @@ PHẦN 2 — CẤU TRÚC PLUGIN
       │   └── lot-generator.css         (~400 lines) ← Toàn bộ styles (dropdown, toast, row highlight...)
       └── js/
           ├── variant-manager.js        (~470 lines) ← CRUD biến thể + presets + chips + quick product modal
-          ├── lot-generate.js           (~530 lines) ← ⭐ All-in-one workflow (search → modal SP → modal variant → generate)
-          ├── lot-detail.js             (~250 lines) ← Chi tiết phiếu (row highlight, toggle config, bulk actions)
+          ├── lot-generate.js           (~560 lines) ← ⭐ All-in-one workflow (search → modal → generate + EXP dd/mm/yyyy sync)
+          ├── lot-detail.js             (~450 lines) ← Chi tiết phiếu (row highlight, bulk actions, gắn vào thùng modal)
           └── lot-list.js                             ← DS phiếu (phân trang, filter, link detail)
 
   GHI CHÚ FILE:
@@ -276,9 +306,9 @@ PHẦN 3 — HOOK VÀO SIDEBAR tgs_shop_management
 
   // 2. Thêm menu sidebar
   add_action('tgs_shop_sidebar_menu', function($current_view) {
-      // Nhóm: "Sinh mã định danh"
-      //   ├── Sinh mã mới
-      //   ├── DS phiếu sinh mã
+      // Nhóm: "Định danh sản phẩm"  (đổi tên từ v1.1.0)
+      //   ├── Tạo mã định danh
+      //   ├── DS định danh sản phẩm
       //   └── Quản lý biến thể
   });
 
@@ -560,11 +590,29 @@ PHẦN 4 — MÀN HÌNH CHI TIẾT
      - Đếm real-time: "🟡 Chờ dán: 47 | 🟢 Tồn kho: 3"
 
   AJAX:
-    tgs_lot_gen_detail_get         → Load chi tiết phiếu + lots
+    tgs_lot_gen_detail_get         → Load chi tiết phiếu + lots (JOIN box_code)
     tgs_lot_gen_activate_lots      → Đổi trạng thái → tồn kho (bulk)
     tgs_lot_gen_deactivate_lots    → Đổi trạng thái → chờ dán (bulk, đổi ngược)
     tgs_lot_gen_delete_lots        → Xóa vĩnh viễn mã thừa
     tgs_lot_gen_print_barcodes     → In barcode (tham khảo tgs_lot_print_barcodes)
+
+  CROSS-PLUGIN (gọi sang tgs_box_manager, dùng boxNonce):
+    tgs_box_search_boxes           → Tìm thùng còn chỗ (autocomplete trong modal)
+    tgs_box_add_items              → Gắn lot_ids vào box_id (kiểm tra capacity)
+
+  E) GẮN VÀO THÙNG (mới v1.1.0):
+     - Nút "Gắn vào thùng (N)" trên toolbar
+     - Chỉ count mã chưa gắn thùng (data-box-id=0)
+     - Bấm → Modal: ô tìm thùng → chọn → xác nhận
+     - Nếu tất cả mã đã gắn thùng → toast cảnh báo, hướng dẫn vào trang thùng
+     - Nếu chọn lẫn đã gắn + chưa gắn → bỏ qua mã đã gắn, toast thông báo
+     - Gọi tgs_box_add_items (cross-plugin, dùng boxNonce)
+     - Sau khi gắn xong → reload detail → cột Thùng hiện mã thùng
+
+  F) CỘT THÙNG (mới v1.1.0):
+     - Bảng lots thêm cột "Thùng" (giữa HSD và Trạng thái)
+     - SQL: LEFT JOIN wp_global_box_manager bx ON l.global_box_manager_id = bx.box_id
+     - Hiển thị: <code>box_code</code> nếu có, trống nếu chưa gắn
 
 
 ================================================================================
@@ -609,7 +657,9 @@ PHẦN 5 — DANH SÁCH AJAX ENDPOINTS (ĐÃ TRIỂN KHAI: 14 actions)
   ┌────────────────────────────────────────┬──────────────────────────────┐
   │ tgs_lot_gen_get_detail                 │ Phiếu + lots + variant batch │
   └────────────────────────────────────────┴──────────────────────────────┘
-  → Trả về: ledger info, stats, lots[] với variant data (JOIN 1 lần, ko N+1)
+  → Trả về: ledger info, stats, lots[] với variant data + box_code (JOIN 1 lần)
+  → JOIN: LEFT JOIN wp_global_box_manager → lấy box_code cho mỗi lot
+  → Mỗi lot: global_box_manager_id, box_code (NULL nếu chưa gắn thùng)
 
   ▸ F. QUẢN LÝ MÃ (4 actions)
   ┌────────────────────────────────────────┬──────────────────────────────┐
@@ -811,6 +861,18 @@ PHẦN 8 — ĐÁNH GIÁ & TRẠNG THÁI HIỆN TẠI
   │ UX fix  │ Bỏ MFG date (không cần khi sinh mã)               │ ✅ DONE   │
   └─────────┴────────────────────────────────────────────────────┴───────────┘
 
+  TÍCH HỢP TGS_BOX_MANAGER (v1.1.0):
+  ┌─────────┬────────────────────────────────────────────────────┬───────────┐
+  │ Feature │ Mô tả                                              │ Trạng thái│
+  ├─────────┼────────────────────────────────────────────────────┼───────────┤
+  │ Rename  │ Đổi tên menu + tiêu đề: Định danh sản phẩm        │ ✅ DONE   │
+  │ Column  │ Thêm cột Thùng (box_code) trong detail table       │ ✅ DONE   │
+  │ Assign  │ Nút Gắn vào thùng + modal tìm thùng               │ ✅ DONE   │
+  │ Guard   │ Mã đã gắn thùng → không cho gắn lại từ detail     │ ✅ DONE   │
+  │ Nonce   │ boxNonce truyền qua wp_localize_script             │ ✅ DONE   │
+  │ EXP     │ HSD input dd/mm/yyyy + native calendar picker      │ ✅ DONE   │
+  └─────────┴────────────────────────────────────────────────────┴───────────┘
+
 
 ================================================================================
 PHẦN 9 — CÁC BẢNG ẢNH HƯỞNG TÓM TẮT (THỰC TẾ)
@@ -954,5 +1016,6 @@ PHẦN 11 — FILE NÀY DÙNG ĐỂ LÀM GÌ
      sau đó giúp tôi [mô tả yêu cầu]"
 
 ================================================================================
-  ✅ PLUGIN ĐÃ HOÀN THÀNH v1.0.0 — SẴN SÀNG SỬ DỤNG
+  ✅ PLUGIN ĐÃ HOÀN THÀNH v1.1.0 — TÍCH HỢP TGS_BOX_MANAGER
+  Đổi tên: "Định danh sản phẩm" | Gắn vào thùng | HSD dd/mm/yyyy
 ================================================================================
