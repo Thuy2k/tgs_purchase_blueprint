@@ -1,0 +1,779 @@
+================================================================================
+  KẾ HOẠCH TRIỂN KHAI PLUGIN: TGS LOT GENERATOR
+  (Sinh mã định danh tự động + Quản lý biến thể sản phẩm)
+  Ngày tạo: 17/03/2026
+  Tác giả: AI Assistant
+  Trạng thái: DRAFT — chờ duyệt trước khi code
+================================================================================
+
+
+================================================================================
+PHẦN 0 — TÓM TẮT NHU CẦU THỰC TẾ
+================================================================================
+
+  VẤN ĐỀ THỰC TẾ:
+    - Kho hàng đã có sẵn hàng nghìn mặt hàng, số lượng lớn (mua từ trước)
+    - Không thể tạo phiếu mua hàng lại → không thể nhập kho → không có batch
+    - Hàng trong kho bừa bộn, cần dán mã định danh (barcode) để quản lý
+    - Nhiều SP có biến thể (bỉm: size S/M/L, áo: màu đỏ/xanh) nhưng chung 1 SKU
+    - Cần sinh mã hàng loạt, in dán, rồi quét để quản lý
+
+  MỤC TIÊU:
+    ✅ Tạo bảng biến thể sản phẩm (size, màu, HSD...)
+    ✅ Sinh mã định danh tự động hàng loạt cho 1 SP + 1 biến thể
+    ✅ Lưu vào phiếu (local_ledger type=16) để có lịch sử, tra cứu
+    ✅ In barcode label (35×22mm, Xprinter) — tham khảo ticket-detail-base
+    ✅ Quản lý trạng thái: 100=vừa sinh → 1=đã dán vào kho (tồn kho)
+    ✅ Xóa mã thừa (xóa vĩnh viễn khỏi DB + cập nhật list_product_lots)
+    ✅ Tích nhanh hàng loạt để chuyển trạng thái (dán xong → tồn kho)
+    ✅ Tương lai: liên kết batch, thống kê theo biến thể
+
+  PLUGIN MỚI: tgs_lot_generator
+    - Hook vào sidebar của tgs_shop_management
+    - Dùng filter: tgs_shop_dashboard_routes + action: tgs_shop_sidebar_menu
+    - Mặc định: tạo mã cho website hiện tại (blog_id hiện tại)
+
+
+================================================================================
+PHẦN 0.5 — GHI CHÚ KỸ THUẬT QUAN TRỌNG (17/03/2026)
+================================================================================
+
+  ⚠️ QUY TẮC THÊM BẢNG / CỘT MỚI:
+
+  1. BẢNG MỚI (VD: wp_global_product_variants):
+     → Thêm CREATE TABLE vào file class-tgs-database.php (plugin tgs_shop_management)
+     → Để user lần đầu kích hoạt plugin cũng sinh bảng đầy đủ từ đầu
+     → Đặt cùng khu vực các bảng global khác (sau wp_global_batch_movement)
+
+  2. CỘT MỚI trên bảng CŨ (VD: variant_id trên wp_global_product_lots):
+     → Bước A: Tạo file migration riêng (VD: 2026_03_17_add_variant_id.php)
+              → ALTER TABLE ADD COLUMN nếu cột chưa tồn tại
+              → Import/require migration trong class-tgs-database.php
+              → Migration chạy cho hệ thống ĐÃ CÓ dữ liệu (existing installations)
+     → Bước B: ĐỒNG THỜI thêm cột vào cuối CREATE TABLE trong class-tgs-database.php
+              → Để user MỚI kích hoạt plugin lần đầu cũng có cột ngay
+              → Tiện theo dõi cấu trúc bảng (đọc 1 file là biết hết)
+
+  3. TÓM LẠI:
+     → class-tgs-database.php = "source of truth" cho CẤU TRÚC BẢNG đầy đủ
+     → Migration files = xử lý UPGRADE cho hệ thống đang chạy
+     → Cả 2 phải ĐỒNG BỘ: cột trong CREATE TABLE = cột sau migration
+
+
+================================================================================
+PHẦN 1 — BẢNG DỮ LIỆU MỚI
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+1.1 wp_global_product_variants — Bảng biến thể sản phẩm (GLOBAL, 1 bảng duy nhất)
+────────────────────────────────────────────────────────────────────────────────
+
+  Mô tả: Lưu TẤT CẢ giá trị biến thể của sản phẩm toàn hệ thống.
+         Mỗi bản ghi = 1 giá trị biến thể cụ thể (VD: "Size M", "Màu đỏ", "HSD 12/2026").
+         1 SP (SKU) có thể có NHIỀU biến thể (N dòng cùng product_sku).
+         Dùng cho: gắn vào lot (B2), gắn vào batch (tương lai), hiển thị khi bán POS.
+
+  variant_id                     BIGINT PK AUTO_INCREMENT
+  product_sku                    VARCHAR(255) NOT NULL        -- SKU sản phẩm (chung toàn hệ thống)
+  variant_type                   VARCHAR(100) NOT NULL        -- Loại biến thể: 'size', 'color', 'expiry', 'custom'
+  variant_label                  VARCHAR(255)                 -- Nhãn hiển thị: "Kích thước", "Màu sắc", "HSD", "Đợt nhập"
+  variant_value                  VARCHAR(500) NOT NULL        -- Giá trị: "M", "Đỏ", "12/2026", "Đợt 1 - T3/2026"
+  variant_code                   VARCHAR(100)                 -- Mã rút gọn (tùy chọn): "M", "RED", "2026-12"
+                                                              -- Dùng để ghép vào batch_code hoặc hiện trên label
+  variant_meta                   JSON                         -- Mở rộng: {"hex":"#FF0000"}, {"weight":"900g"}
+  sort_order                     INT DEFAULT 0                -- Thứ tự sắp xếp trong danh sách
+  is_active                      TINYINT DEFAULT 1            -- 1=đang dùng, 0=ngừng
+  user_id                        BIGINT
+  is_deleted                     TINYINT DEFAULT 0
+  deleted_at                     DATETIME
+  created_at                     DATETIME
+  updated_at                     DATETIME
+
+  INDEX:
+    (product_sku, variant_type)          -- query "tất cả size của SKU X"
+    (product_sku, is_deleted, is_active) -- query "biến thể active của SKU X"
+
+  VÍ DỤ:
+    ┌────────────┬──────────┬──────────────┬──────────────┬──────────────┐
+    │ variant_id │ SKU      │ variant_type │ variant_label│ variant_value│
+    ├────────────┼──────────┼──────────────┼──────────────┼──────────────┤
+    │ 1          │ BIM-001  │ size         │ Kích thước   │ S            │
+    │ 2          │ BIM-001  │ size         │ Kích thước   │ M            │
+    │ 3          │ BIM-001  │ size         │ Kích thước   │ L            │
+    │ 4          │ BIM-001  │ color        │ Màu sắc      │ Trắng        │
+    │ 5          │ BIM-001  │ color        │ Màu sắc      │ Hồng         │
+    │ 6          │ SUA-DL01 │ expiry       │ HSD          │ 12/2026      │
+    │ 7          │ SUA-DL01 │ expiry       │ HSD          │ 06/2027      │
+    │ 8          │ AO-001   │ size         │ Kích thước   │ Freesize     │
+    │ 9          │ AO-001   │ color        │ Màu sắc      │ Đỏ           │
+    │ 10         │ AO-001   │ color        │ Màu sắc      │ Xanh         │
+    └────────────┴──────────┴──────────────┴──────────────┴──────────────┘
+
+  VARIANT_TYPE CỐ ĐỊNH (khởi tạo):
+    'size'    — Kích thước (S, M, L, XL, Freesize...)
+    'color'   — Màu sắc (Đỏ, Xanh, Trắng, Hồng...)
+    'expiry'  — Hạn sử dụng (12/2026, 06/2027...)
+    'custom'  — Tùy chỉnh (Đợt nhập, Mùi hương, Trọng lượng...)
+
+  QUAN HỆ:
+    1 SKU → N biến thể (N dòng cùng product_sku)
+    1 biến thể ← N lot (wp_global_product_lots.variant_id)
+    1 biến thể ← N batch (tương lai: wp_global_batch.variant_id)
+
+
+────────────────────────────────────────────────────────────────────────────────
+1.2 Cột mới trên wp_global_product_lots (B2) — liên kết biến thể
+────────────────────────────────────────────────────────────────────────────────
+
+  CỘT THÊM:
+    variant_id    BIGINT DEFAULT NULL     -- FK → wp_global_product_variants
+                                          -- Lot này thuộc biến thể nào
+                                          -- NULL = chưa gán biến thể (hàng cũ, SP đơn giản)
+
+  Ý NGHĨA:
+    - Quét mã lot → biết ngay SP gì + biến thể nào (size M, màu đỏ...)
+    - POS: gõ SKU → list biến thể → chọn → lọc lot theo variant_id → bán
+    - Thống kê: bán bao nhiêu SP "BIM-001 size M" vs "BIM-001 size L"
+
+  MIGRATION:
+    ALTER TABLE wp_global_product_lots ADD COLUMN variant_id BIGINT DEFAULT NULL;
+    ALTER TABLE wp_global_product_lots ADD INDEX idx_variant (variant_id);
+
+
+────────────────────────────────────────────────────────────────────────────────
+1.3 Ledger type mới: type = 16 (Phiếu sinh mã tự động)
+────────────────────────────────────────────────────────────────────────────────
+
+  Dùng bảng local_ledger (A3) + local_ledger_item (A4) có sẵn.
+  KHÔNG tạo bảng mới — tận dụng hoàn toàn cấu trúc hiện tại.
+
+  CONSTANT MỚI:
+    TGS_LEDGER_TYPE_LOT_GENERATE = 16     -- Phiếu sinh mã định danh tự động
+
+  CÁCH LƯU:
+    local_ledger:
+      local_ledger_type = 16
+      local_ledger_code = "SM-{YYYYMMDD}-{auto_increment}"  (SM = Sinh Mã)
+      local_ledger_title = "Sinh mã tự động — {tên SP} — {biến thể}"
+      local_ledger_approver_status = 1 (auto-approved, không cần duyệt)
+      local_ledger_note = ghi chú tùy user
+
+    local_ledger_item:
+      local_product_name_id = SP nào
+      quantity = số lượng mã đã sinh
+      list_product_lots = [id1, id2, id3, ...] (JSON array lot_id đã sinh)
+      local_ledger_item_meta = JSON: {"variant_id": 5, "variant_label": "Màu Hồng"}
+
+  VÍ DỤ:
+    Phiếu SM-20260317-001:
+      ├── Item 1: BIM-001 (Bỉm Moony) × 50 mã, variant=Size M
+      │   list_product_lots: [1001, 1002, ..., 1050]
+      ├── Item 2: BIM-001 (Bỉm Moony) × 30 mã, variant=Size L
+      │   list_product_lots: [1051, 1052, ..., 1080]
+      └── Item 3: SUA-DL01 (Dielac) × 100 mã, variant=HSD 12/2026
+          list_product_lots: [1081, 1082, ..., 1180]
+
+  LÝ DO DÙNG LEDGER:
+    - Có lịch sử: ai tạo, khi nào, bao nhiêu mã, SP gì
+    - Xóa mã → cập nhật list_product_lots → tính lại quantity
+    - Tra cứu dễ: "Hôm qua tạo bao nhiêu mã? SP gì? Ai tạo?"
+    - Tương thích hệ thống: dùng chung list_product_lots, chung bảng
+
+
+================================================================================
+PHẦN 2 — CẤU TRÚC PLUGIN
+================================================================================
+
+  📁 wp-content/plugins/tgs_lot_generator/
+  ├── tgs-lot-generator.php                  ← Entry point: hooks, routes, sidebar
+  ├── includes/
+  │   ├── class-lot-generator-database.php   ← Tạo bảng variant + migration cột
+  │   ├── class-lot-generator-ajax.php       ← AJAX: CRUD biến thể + sinh mã + in + xóa
+  │   └── class-lot-generator-helpers.php    ← Helpers: sinh barcode, format data
+  ├── admin-views/
+  │   ├── variants/
+  │   │   └── list.php                       ← Quản lý biến thể (CRUD, tìm kiếm)
+  │   ├── generate/
+  │   │   ├── create.php                     ← ⭐ Trang sinh mã (màn hình chính)
+  │   │   └── detail.php                     ← ⭐ Chi tiết phiếu sinh mã (xem, in, xóa, tích)
+  │   └── components/
+  │       └── print-labels.php               ← Template in barcode (tham khảo ticket-detail)
+  └── assets/
+      ├── css/
+      │   └── lot-generator.css              ← Styles riêng
+      └── js/
+          ├── variant-manager.js             ← JS quản lý biến thể
+          ├── lot-generate.js                ← JS trang tạo mã
+          └── lot-detail.js                  ← JS trang chi tiết (in, xóa, tích trạng thái)
+
+
+================================================================================
+PHẦN 3 — HOOK VÀO SIDEBAR tgs_shop_management
+================================================================================
+
+  FILE: tgs-lot-generator.php
+
+  // 1. Đăng ký routes
+  add_filter('tgs_shop_dashboard_routes', function($routes) {
+      return array_merge($routes, [
+          'lot-variants'       => ['Quản lý biến thể',       'variants/list.php'],
+          'lot-generate'       => ['Sinh mã định danh',      'generate/create.php'],
+          'lot-generate-list'  => ['DS phiếu sinh mã',       'generate/list.php'],
+          'lot-generate-detail'=> ['Chi tiết phiếu sinh mã', 'generate/detail.php'],
+      ]);
+  });
+
+  // 2. Thêm menu sidebar
+  add_action('tgs_shop_sidebar_menu', function($current_view) {
+      // Nhóm: "Sinh mã định danh"
+      //   ├── Sinh mã mới
+      //   ├── DS phiếu sinh mã
+      //   └── Quản lý biến thể
+  });
+
+  VỊ TRÍ SIDEBAR: Đặt SAU nhóm "Mua hàng", TRƯỚC nhóm "Báo cáo"
+
+
+================================================================================
+PHẦN 4 — MÀN HÌNH CHI TIẾT
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+4.1 Trang "Quản lý biến thể" (variants/list.php)
+────────────────────────────────────────────────────────────────────────────────
+
+  MỤC ĐÍCH: CRUD biến thể cho từng SKU.
+
+  LAYOUT:
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Quản lý biến thể sản phẩm                                     [+ Thêm]│
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ 🔍 Tìm sản phẩm: [____________________] (autocomplete SKU/tên)        │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │                                                                        │
+  │ SKU: BIM-001 — Bỉm Moony                                              │
+  │ ┌──────────┬──────────────┬──────────────┬──────┬────────┐             │
+  │ │ Loại     │ Nhãn         │ Giá trị      │ Mã   │        │             │
+  │ ├──────────┼──────────────┼──────────────┼──────┼────────┤             │
+  │ │ size     │ Kích thước   │ S            │ S    │ ✎  ×   │             │
+  │ │ size     │ Kích thước   │ M            │ M    │ ✎  ×   │             │
+  │ │ size     │ Kích thước   │ L            │ L    │ ✎  ×   │             │
+  │ │ color    │ Màu sắc      │ Trắng        │ W    │ ✎  ×   │             │
+  │ │ color    │ Màu sắc      │ Hồng         │ PK   │ ✎  ×   │             │
+  │ └──────────┴──────────────┴──────────────┴──────┴────────┘             │
+  │                                                                [+ Thêm]│
+  │                                                                        │
+  │ ─── Thêm biến thể mới ───────────────────────────────────────          │
+  │ Loại: [▾ size / color / expiry / custom ]                              │
+  │ Nhãn: [_______________] (tự fill theo loại, cho sửa)                   │
+  │ Giá trị: [_______________]                                             │
+  │ Mã rút gọn: [_______] (tùy chọn)                                      │
+  │                                                       [Lưu biến thể]  │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  CHỨC NĂNG:
+    - Tìm SP bằng autocomplete (SKU hoặc tên) → hiện bảng biến thể
+    - Thêm/sửa/xóa biến thể (inline hoặc form nhỏ)
+    - Loại biến thể: dropdown có 4 loại cơ bản (size, color, expiry, custom)
+    - Nhãn tự fill: chọn "size" → nhãn = "Kích thước", cho sửa
+    - Xóa mềm (is_deleted=1)
+    - Không xóa được biến thể đã có lot gắn vào (cảnh báo)
+
+  AJAX:
+    tgs_lot_gen_variant_list     → Danh sách biến thể theo SKU
+    tgs_lot_gen_variant_save     → Thêm/sửa biến thể
+    tgs_lot_gen_variant_delete   → Xóa mềm biến thể
+    tgs_lot_gen_search_products  → Autocomplete tìm SP (query local_product_name)
+
+
+────────────────────────────────────────────────────────────────────────────────
+4.2 Trang "Sinh mã định danh" (generate/create.php) — ⭐ MÀN HÌNH CHÍNH
+────────────────────────────────────────────────────────────────────────────────
+
+  MỤC ĐÍCH: Chọn SP → chọn biến thể → nhập SL → sinh mã hàng loạt → lưu phiếu.
+
+  LAYOUT:
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Sinh mã định danh tự động                                              │
+  │ ⚠️ Hiện tại chỉ áp dụng cho sản phẩm CÓ theo dõi HSD                 │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │                                                                        │
+  │ ┌─ Thông tin phiếu ──────────────────────────────────────────────────┐  │
+  │ │ Mã phiếu: SM-20260317-001  (tự sinh, read-only)                   │  │
+  │ │ Shop: Thế Giới Sữa - Quận 1 (web hiện tại, read-only)            │  │
+  │ │ Ghi chú: [__________________________________________________]     │  │
+  │ └────────────────────────────────────────────────────────────────────┘  │
+  │                                                                        │
+  │ ┌─ Chọn sản phẩm ───────────────────────────────────────────────────┐  │
+  │ │ 🔍 Tìm sản phẩm: [_________________________] (autocomplete)       │  │
+  │ │                                                                    │  │
+  │ │ ⓘ Chưa có sản phẩm? [+ Thêm nhanh sản phẩm]                     │  │
+  │ │   → Modal: Tên SP, SKU (tự sinh ngẫu nhiên hoặc nhập tay),       │  │
+  │ │     Giá, Danh mục → Lưu vào local_product_name (tracking=1)      │  │
+  │ └────────────────────────────────────────────────────────────────────┘  │
+  │                                                                        │
+  │ ┌─ Danh sách sinh mã ───────────────────────────────────────────────┐  │
+  │ │                                                                    │  │
+  │ │ ┌────────────┬──────────────┬──────────┬─────────┬──────┬───────┐ │  │
+  │ │ │ Sản phẩm   │ Biến thể     │ Giá      │ HSD     │ SL   │      │ │  │
+  │ │ ├────────────┼──────────────┼──────────┼─────────┼──────┼───────┤ │  │
+  │ │ │ Bỉm Moony  │ Size M       │ 350,000  │         │ [50] │  ×   │ │  │
+  │ │ │ BIM-001    │ ▾ [chọn]     │          │         │      │      │ │  │
+  │ │ ├────────────┼──────────────┼──────────┼─────────┼──────┼───────┤ │  │
+  │ │ │ Dielac     │ HSD 12/2026  │ 450,000  │12/2026  │[100] │  ×   │ │  │
+  │ │ │ SUA-DL01   │ ▾ [chọn]     │          │         │      │      │ │  │
+  │ │ └────────────┴──────────────┴──────────┴─────────┴──────┴───────┘ │  │
+  │ │                                                                    │  │
+  │ │ [+ Thêm dòng]                                   Tổng: 150 mã     │  │
+  │ └────────────────────────────────────────────────────────────────────┘  │
+  │                                                                        │
+  │                                            [Sinh mã & Lưu phiếu]      │
+  │                                                                        │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  LUỒNG HOẠT ĐỘNG:
+    1. User tìm SP (autocomplete) → chọn → thêm vào bảng
+       - Nếu SP chưa có → bấm [+ Thêm nhanh] → modal tạo SP mới
+       - SP mới: local_product_is_tracking = 1 (bắt buộc)
+       - SKU tự sinh ngẫu nhiên nếu để trống
+    2. Chọn biến thể: dropdown load từ wp_global_product_variants theo SKU
+       - Nếu SP chưa có biến thể → hiện "(Không có biến thể)"
+       - Có nút [+ Thêm biến thể nhanh] inline (modal nhỏ)
+    3. Nhập giá (tùy chọn, mặc định lấy từ local_product_price)
+    4. Nhập HSD (tùy chọn, nếu biến thể type=expiry → tự fill)
+    5. Nhập số lượng mã cần sinh
+    6. Bấm [Sinh mã & Lưu phiếu]:
+       a) Validate: chỉ SP có tracking, SL > 0, SL hợp lý (≤ 2000/dòng)
+       b) Tạo local_ledger (type=16)
+       c) Với MỖI DÒNG trong bảng:
+          - Gọi sinh N mã barcode EAN-13 (reuse tgs_shop_generate_unique_barcode)
+          - INSERT N bản ghi vào wp_global_product_lots:
+            • global_product_lot_barcode = mã EAN-13 sinh
+            • local_product_name_id = SP đã chọn
+            • global_product_lot_price = giá nhập
+            • to_blog_id = blog_id hiện tại
+            • source_blog_id = blog_id hiện tại
+            • local_product_lot_is_active = 100 (tự động sinh, chưa dán)
+            • exp_date = HSD (nếu có)
+            • local_product_sku = SKU
+            • variant_id = biến thể đã chọn (hoặc NULL)
+          - Tạo local_ledger_item:
+            • local_product_name_id = SP
+            • quantity = N
+            • list_product_lots = [id1, id2, ..., idN]
+            • local_ledger_item_meta = {"variant_id": X, "variant_label": "Size M"}
+       d) Redirect sang trang detail của phiếu vừa tạo
+
+  VALIDATE:
+    - SP phải có local_product_is_tracking = 1
+    - Nếu SP tracking = 0 → cảnh báo "SP này không theo dõi HSD, chưa hỗ trợ"
+    - SL mỗi dòng: 1 ≤ qty ≤ 2000 (tránh sinh quá nhiều 1 lần)
+    - Không cho thêm trùng SP + biến thể (cùng dòng)
+
+  THÊM NHANH SẢN PHẨM (modal):
+    - Tên SP (bắt buộc)
+    - SKU: tự sinh "SP-{timestamp}-{random4}" hoặc nhập tay
+    - Giá bán tham khảo
+    - Danh mục (dropdown từ local_product_cat)
+    - local_product_is_tracking = 1 (ẩn, mặc định)
+    - Lưu → INSERT local_product_name → trả về để chọn tiếp
+
+
+────────────────────────────────────────────────────────────────────────────────
+4.3 Trang "DS phiếu sinh mã" (generate/list.php)
+────────────────────────────────────────────────────────────────────────────────
+
+  MỤC ĐÍCH: Danh sách các phiếu sinh mã đã tạo.
+
+  LAYOUT:
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Danh sách phiếu sinh mã                               [+ Sinh mã mới] │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ 🔍 Tìm kiếm: [___________]  Từ ngày: [___] Đến ngày: [___]           │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ ┌──────────────┬──────────────────┬──────┬──────────┬─────────┬──────┐ │
+  │ │ Mã phiếu     │ Tiêu đề          │ SL mã│ Người tạo│ Ngày    │      │ │
+  │ ├──────────────┼──────────────────┼──────┼──────────┼─────────┼──────┤ │
+  │ │ SM-0317-001  │ Sinh mã Bỉm...   │ 150  │ admin    │ 17/03   │ Xem  │ │
+  │ │ SM-0317-002  │ Sinh mã Dielac.. │ 200  │ kho01    │ 17/03   │ Xem  │ │
+  │ └──────────────┴──────────────────┴──────┴──────────┴─────────┴──────┘ │
+  │ Phân trang: < 1 2 3 >                                                  │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  AJAX:
+    tgs_lot_gen_ledger_list → Danh sách phiếu type=16 (phân trang, filter)
+
+
+────────────────────────────────────────────────────────────────────────────────
+4.4 Trang "Chi tiết phiếu sinh mã" (generate/detail.php) — ⭐ TRANG QUAN TRỌNG
+────────────────────────────────────────────────────────────────────────────────
+
+  MỤC ĐÍCH: Xem chi tiết phiếu, in mã, tích trạng thái, xóa mã thừa.
+
+  LAYOUT:
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ Chi tiết phiếu sinh mã: SM-20260317-001                                │
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │                                                                        │
+  │ ┌─ Thông tin chung ─────────────────────────────────────────────────┐   │
+  │ │ Mã phiếu: SM-20260317-001       Người tạo: admin                 │   │
+  │ │ Ngày tạo: 17/03/2026 14:30      Shop: TGS Quận 1                 │   │
+  │ │ Ghi chú: Sinh mã cho hàng tồn kho cũ                             │   │
+  │ └───────────────────────────────────────────────────────────────────┘   │
+  │                                                                        │
+  │ ┌─ Sản phẩm & Mã định danh ────────────────────────────────────────┐   │
+  │ │                                                                    │  │
+  │ │ ── Bỉm Moony (BIM-001) — Size M — 50 mã ──────────────────────── │  │
+  │ │                                                                    │  │
+  │ │ [☑ Chọn tất cả]  [Đổi trạng thái → Tồn kho]  [In mã đã chọn]   │  │
+  │ │ [Xóa mã đã chọn]                                                  │  │
+  │ │                                                                    │  │
+  │ │ ┌────┬───────────────┬────────────┬──────────────┬───────────────┐ │  │
+  │ │ │ ☐  │ Mã barcode    │ HSD        │ Trạng thái   │               │ │  │
+  │ │ ├────┼───────────────┼────────────┼──────────────┼───────────────┤ │  │
+  │ │ │ ☐  │ 4281335871350 │            │ 🟡 Chờ dán   │ In • Xóa     │ │  │
+  │ │ │ ☐  │ 5192847361024 │            │ 🟡 Chờ dán   │ In • Xóa     │ │  │
+  │ │ │ ☐  │ 6038471920583 │            │ 🟢 Tồn kho   │ In           │ │  │
+  │ │ │ ☐  │ 7294816350271 │            │ 🟡 Chờ dán   │ In • Xóa     │ │  │
+  │ │ │ ...│               │            │              │               │ │  │
+  │ │ └────┴───────────────┴────────────┴──────────────┴───────────────┘ │  │
+  │ │ Hiển thị: 50 mã  |  🟡 Chờ dán: 47  |  🟢 Tồn kho: 3            │  │
+  │ │                                                                    │  │
+  │ │ ── Dielac (SUA-DL01) — HSD 12/2026 — 100 mã ──────────────────── │  │
+  │ │ (tương tự...)                                                      │  │
+  │ │                                                                    │  │
+  │ └────────────────────────────────────────────────────────────────────┘  │
+  │                                                                        │
+  │ ┌─ Hành động nhanh (sidebar phải) ─────────────────────────────────┐   │
+  │ │                                                                    │  │
+  │ │ Thống kê phiếu:                                                   │  │
+  │ │   Tổng mã đã sinh: 150                                            │  │
+  │ │   Chờ dán (100): 140                                               │  │
+  │ │   Tồn kho (1): 10                                                  │  │
+  │ │   Đã xóa: 0                                                       │  │
+  │ │                                                                    │  │
+  │ │ [In tất cả mã chờ dán]                                            │  │
+  │ │ [Tích tất cả → Tồn kho]                                           │  │
+  │ │                                                                    │  │
+  │ │ Hướng dẫn nhanh:                                                   │  │
+  │ │ • In mã → dán lên sản phẩm trong kho                              │  │
+  │ │ • Sau khi dán xong, tích các mã đã dán                            │  │
+  │ │   → chuyển trạng thái "Tồn kho"                                   │  │
+  │ │ • Mã thừa (in dư) → chọn và xóa                                  │  │
+  │ │ • Mã đã ở trạng thái "Tồn kho" không                             │  │
+  │ │   thể xóa (phải đổi lại "Chờ dán" trước)                         │  │
+  │ └────────────────────────────────────────────────────────────────────┘  │
+  │                                                                        │
+  └──────────────────────────────────────────────────────────────────────────┘
+
+  CHỨC NĂNG CHI TIẾT:
+
+  A) IN MÃ:
+     - Tham khảo HOÀN TOÀN từ ticket-detail-base.js + TGS_Ajax_Lot::print_barcodes()
+     - Format: 70×22mm, 2 label/hàng, mỗi label 35×22mm
+     - Dùng JsBarcode (EAN-13) — CDN: jsbarcode@3.11.5
+     - Options: hiện giá (✓/✗), hiện biến thể (✓/✗), hiện HSD (✓/✗)
+     - AJAX endpoint: tgs_lot_gen_print_barcodes (reuse logic từ tgs_lot_print_barcodes)
+     - Label content:
+       ┌─────────────────────────────┐
+       │    |||||||||||||||||||||||   │  ← Barcode SVG (EAN-13)
+       │    4281335871350             │  ← Số barcode
+       │  Bỉm Moony                  │  ← Tên SP (6.5pt, ellipsis)
+       │  350,000đ                   │  ← Giá (nếu bật)
+       │  Size M                     │  ← Biến thể (nếu bật)
+       │  HSD: 12/2026               │  ← HSD (nếu có)
+       └─────────────────────────────┘
+
+  B) TÍCH TRẠNG THÁI (Batch update):
+     - Chọn nhiều mã (checkbox) → bấm [Đổi trạng thái → Tồn kho]
+     - AJAX: tgs_lot_gen_activate_lots
+       → UPDATE wp_global_product_lots SET local_product_lot_is_active = 1
+         WHERE global_product_lot_id IN (...)
+     - Hoặc bấm [Tích tất cả → Tồn kho] (sidebar) → đổi TẤT CẢ mã is_active=100
+     - Confirmation dialog: "Đổi 47 mã sang trạng thái Tồn kho?"
+
+  C) XÓA MÃ THỪA:
+     - Chọn mã → bấm [Xóa mã đã chọn]
+     - CHỈ xóa được mã có local_product_lot_is_active = 100 (chờ dán)
+     - Mã đã ở trạng thái 1 (tồn kho) → KHÔNG cho xóa → cảnh báo
+     - XÓA VĨNH VIỄN: DELETE FROM wp_global_product_lots WHERE id IN (...)
+     - SAU KHI XÓA:
+       → Cập nhật local_ledger_item.list_product_lots (loại bỏ id đã xóa)
+       → Cập nhật local_ledger_item.quantity (trừ đi SL đã xóa)
+     - Confirmation dialog: "Xóa vĩnh viễn 5 mã? Không thể hoàn tác!"
+
+  D) LỌC/HIỂN THỊ:
+     - Lọc theo trạng thái: Tất cả / Chờ dán (100) / Tồn kho (1)
+     - Phân trang nếu > 100 mã (server-side pagination)
+     - Đếm real-time: "🟡 Chờ dán: 47 | 🟢 Tồn kho: 3"
+
+  AJAX:
+    tgs_lot_gen_detail_get         → Load chi tiết phiếu + lots
+    tgs_lot_gen_activate_lots      → Đổi trạng thái → tồn kho (bulk)
+    tgs_lot_gen_deactivate_lots    → Đổi trạng thái → chờ dán (bulk, đổi ngược)
+    tgs_lot_gen_delete_lots        → Xóa vĩnh viễn mã thừa
+    tgs_lot_gen_print_barcodes     → In barcode (tham khảo tgs_lot_print_barcodes)
+
+
+================================================================================
+PHẦN 5 — DANH SÁCH AJAX ENDPOINTS
+================================================================================
+
+  Tất cả dùng nonce: 'tgs_lot_gen_nonce'
+
+  ▸ BIẾN THỂ
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ AJAX Action                            │ Mô tả                       │
+  ├────────────────────────────────────────┼──────────────────────────────┤
+  │ tgs_lot_gen_variant_list               │ DS biến thể theo SKU        │
+  │ tgs_lot_gen_variant_save               │ Thêm/sửa biến thể          │
+  │ tgs_lot_gen_variant_delete             │ Xóa mềm biến thể           │
+  │ tgs_lot_gen_search_products            │ Autocomplete SP (SKU/tên)   │
+  │ tgs_lot_gen_quick_add_product          │ Thêm nhanh SP mới           │
+  └────────────────────────────────────────┴──────────────────────────────┘
+
+  ▸ SINH MÃ
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ tgs_lot_gen_generate                   │ Sinh mã + tạo phiếu (POST)  │
+  │ tgs_lot_gen_ledger_list                │ DS phiếu sinh mã (GET)      │
+  │ tgs_lot_gen_detail_get                 │ Chi tiết phiếu + lots (GET) │
+  └────────────────────────────────────────┴──────────────────────────────┘
+
+  ▸ QUẢN LÝ MÃ (trên trang detail)
+  ┌────────────────────────────────────────┬──────────────────────────────┐
+  │ tgs_lot_gen_activate_lots              │ Đổi trạng thái → tồn kho    │
+  │ tgs_lot_gen_deactivate_lots            │ Đổi ngược → chờ dán         │
+  │ tgs_lot_gen_delete_lots                │ Xóa vĩnh viễn mã thừa      │
+  │ tgs_lot_gen_print_barcodes             │ In barcode labels            │
+  └────────────────────────────────────────┴──────────────────────────────┘
+
+
+================================================================================
+PHẦN 6 — LUỒNG HOẠT ĐỘNG END-TO-END
+================================================================================
+
+  KỊCH BẢN 1: HÀNG TỒN KHO CŨ (chưa có mã)
+  ────────────────────────────────────────────
+
+  Bước 1: Vào "Sinh mã định danh" → tìm SP "Bỉm Moony" (BIM-001)
+  Bước 2: SP chưa có biến thể → bấm [+ Thêm biến thể nhanh]
+          → Thêm: Size S, Size M, Size L
+  Bước 3: Thêm 3 dòng sinh mã:
+          - BIM-001 + Size S + SL: 30
+          - BIM-001 + Size M + SL: 50
+          - BIM-001 + Size L + SL: 20
+  Bước 4: Bấm [Sinh mã & Lưu phiếu]
+          → Sinh 100 mã barcode EAN-13
+          → Tạo phiếu SM-20260317-001 (type=16)
+          → Redirect sang trang detail
+  Bước 5: Trang detail → bấm [In tất cả mã chờ dán]
+          → Chọn options: hiện giá ✓, hiện biến thể ✓
+          → Cửa sổ in mở ra → in label 35×22mm
+  Bước 6: Nhân viên kho dán mã lên từng SP trong kho
+  Bước 7: Dán xong → quay lại detail → tích các mã đã dán
+          → Bấm [Đổi trạng thái → Tồn kho]
+          → Mã chuyển từ 🟡 Chờ dán → 🟢 Tồn kho
+  Bước 8: Có 5 mã dư (in thừa) → tích → bấm [Xóa mã đã chọn]
+          → Xóa vĩnh viễn + cập nhật list_product_lots
+
+
+  KỊCH BẢN 2: SẢN PHẨM MỚI (chưa có trong hệ thống)
+  ────────────────────────────────────────────
+
+  Bước 1: Vào "Sinh mã định danh" → tìm SP → không thấy
+  Bước 2: Bấm [+ Thêm nhanh sản phẩm]
+          → Modal: Tên="Áo thun BabyGap", SKU=auto "SP-1710-A3B2"
+          → Giá=120,000, tracking=1
+          → Lưu
+  Bước 3: SP vừa tạo tự động chọn → bấm [+ Thêm biến thể nhanh]
+          → Thêm: Size Freesize, Màu Đỏ, Màu Xanh
+  Bước 4: Thêm 2 dòng: Áo Đỏ × 20, Áo Xanh × 15
+  Bước 5: Sinh mã → in → dán → tích → xong
+
+
+  KỊCH BẢN 3: POS BÁN HÀNG (sau khi đã dán mã)
+  ────────────────────────────────────────────
+
+  Bước 1: Khách mua Bỉm Moony Size M
+  Bước 2: Nhân viên quét barcode trên SP → POS nhận lot_id
+          → Query: wp_global_product_lots → biết SKU + variant_id
+          → Hiện: "Bỉm Moony — Size M — 350,000đ"
+  Bước 3: Hoặc nhân viên gõ "Bỉm Moony" → POS hiện:
+          → BIM-001 — có 3 biến thể: Size S (30), Size M (47), Size L (20)
+          → Chọn Size M → hiện danh sách lot → quét/chọn → bán
+  (Phần POS integration = PHASE 2, không làm trong plugin này)
+
+
+================================================================================
+PHẦN 7 — THỨ TỰ TRIỂN KHAI (TỪNG BƯỚC)
+================================================================================
+
+  Mỗi phase là 1 đoạn code có thể test độc lập.
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 1: Nền tảng (plugin skeleton + bảng + sidebar)                   │
+  │ ──────────────────────────────────────────────────────                  │
+  │ 1.1 Tạo plugin tgs_lot_generator/tgs-lot-generator.php                │
+  │     - Plugin header, activation hook, load includes                    │
+  │     - Hook: tgs_shop_dashboard_routes (register views)                 │
+  │     - Hook: tgs_shop_sidebar_menu (add menu items)                     │
+  │ 1.2 Tạo class-lot-generator-database.php                              │
+  │     - CREATE TABLE wp_global_product_variants (dbDelta)                │
+  │     - ALTER TABLE wp_global_product_lots ADD variant_id                │
+  │     - Version check (option tgs_lot_gen_db_version)                    │
+  │ 1.3 Test: activate plugin → sidebar hiện → bảng được tạo              │
+  │ Ước tính: 1-2 giờ                                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 2: Quản lý biến thể (CRUD)                                      │
+  │ ──────────────────────────────────────────────────────                  │
+  │ 2.1 Tạo class-lot-generator-ajax.php — phần variant                    │
+  │     - AJAX: variant_list, variant_save, variant_delete                 │
+  │     - AJAX: search_products (autocomplete từ local_product_name)       │
+  │ 2.2 Tạo admin-views/variants/list.php + variant-manager.js            │
+  │     - UI: tìm SP → hiện biến thể → thêm/sửa/xóa                      │
+  │ 2.3 Test: tạo biến thể cho SP → verify DB                             │
+  │ Ước tính: 2-3 giờ                                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 3: Trang sinh mã (trang tạo phiếu)                              │
+  │ ──────────────────────────────────────────────────────                  │
+  │ 3.1 AJAX: tgs_lot_gen_generate — logic sinh mã + tạo phiếu            │
+  │     - Reuse: tgs_shop_generate_unique_barcode() cho barcode            │
+  │     - Reuse: tgs_shop_generate_lot_barcode_data() cho barcode_url      │
+  │     - INSERT wp_global_product_lots (N bản ghi, is_active=100)         │
+  │     - INSERT local_ledger (type=16) + local_ledger_item                │
+  │ 3.2 AJAX: tgs_lot_gen_quick_add_product — thêm nhanh SP               │
+  │ 3.3 Tạo admin-views/generate/create.php + lot-generate.js             │
+  │     - Autocomplete SP, dropdown biến thể, nhập SL, submit             │
+  │ 3.4 Test: sinh 10 mã → verify DB (lots + ledger + ledger_item)        │
+  │ Ước tính: 3-4 giờ                                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 4: DS phiếu sinh mã                                             │
+  │ ──────────────────────────────────────────────────────                  │
+  │ 4.1 AJAX: tgs_lot_gen_ledger_list — query local_ledger WHERE type=16  │
+  │ 4.2 Tạo admin-views/generate/list.php                                 │
+  │     - Bảng danh sách, phân trang, filter ngày, tìm kiếm               │
+  │ 4.3 Test: tạo 3 phiếu → list hiện đúng                                │
+  │ Ước tính: 1-2 giờ                                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 5: Trang chi tiết phiếu (xem, tích, xóa)                        │
+  │ ──────────────────────────────────────────────────────                  │
+  │ 5.1 AJAX: tgs_lot_gen_detail_get — load phiếu + lots + variants       │
+  │ 5.2 AJAX: tgs_lot_gen_activate_lots — batch update is_active → 1      │
+  │ 5.3 AJAX: tgs_lot_gen_deactivate_lots — đổi ngược → 100              │
+  │ 5.4 AJAX: tgs_lot_gen_delete_lots — xóa vĩnh viễn + cập nhật ledger  │
+  │ 5.5 Tạo admin-views/generate/detail.php + lot-detail.js               │
+  │     - Hiển thị mã theo nhóm (SP + biến thể)                           │
+  │     - Checkbox chọn nhiều, bulk actions (tích, xóa)                    │
+  │     - Thống kê: chờ dán / tồn kho / đã xóa                            │
+  │     - Lọc theo trạng thái                                              │
+  │ 5.6 Test: tích 10 mã → verify is_active=1, xóa 5 mã → verify DB     │
+  │ Ước tính: 3-4 giờ                                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ PHASE 6: In barcode labels                                             │
+  │ ──────────────────────────────────────────────────────                  │
+  │ 6.1 AJAX: tgs_lot_gen_print_barcodes                                   │
+  │     - Tham khảo: TGS_Ajax_Lot::print_barcodes() (output_print_html)   │
+  │     - Format: 70×22mm, 2 label/hàng, JsBarcode EAN-13                 │
+  │     - Options: hiện giá, hiện biến thể, hiện HSD                      │
+  │     - Query lot + product + variant data → render HTML print page      │
+  │ 6.2 JS: nút in trên detail.php → collect barcodes → open print window │
+  │     - Modal options (3 toggle) trước khi in                            │
+  │ 6.3 Tạo admin-views/components/print-labels.php (template)            │
+  │ 6.4 Test: in 10 mã → kiểm tra label 35×22mm đúng format              │
+  │ Ước tính: 2-3 giờ                                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  TỔNG ƯỚC TÍNH: 12-18 giờ code (2-3 ngày làm việc)
+
+
+================================================================================
+PHẦN 8 — KHẢ THI & ĐÁNH GIÁ
+================================================================================
+
+  ✅ KHẢ THI 100% — Lý do:
+
+  1. KHÔNG THAY ĐỔI CODE CŨ:
+     - Plugin mới, hook vào sidebar qua filter/action có sẵn
+     - Dùng lại hàm sinh barcode có sẵn (tgs_shop_generate_unique_barcode)
+     - Dùng lại bảng có sẵn (local_ledger, local_ledger_item, global_product_lots)
+     - Chỉ thêm 1 bảng mới (variants) + 1 cột mới (variant_id trên lots)
+
+  2. TƯƠNG THÍCH NGƯỢC:
+     - variant_id DEFAULT NULL → lot cũ không bị ảnh hưởng
+     - Ledger type=16 mới → không xung đột type 1-15 cũ
+     - local_product_lot_is_active=100 mới → không xung đột 0,1,2,3 cũ
+
+  3. THỰC TẾ & CẤP THIẾT:
+     - Kho đã có hàng nghìn SP, KHÔNG THỂ tạo lại phiếu mua
+     - Cần dán mã NGAY để quản lý → plugin này giải quyết đúng pain point
+     - Nhân viên kho chỉ cần: tìm SP → nhập SL → sinh mã → in → dán → tích
+     - Không cần hiểu batch, lô, hợp đồng → đơn giản hóa tối đa
+
+  4. MỞ RỘNG SAU:
+     - Phase 2+: liên kết batch (gán batch_id cho lot sau khi dán)
+     - Phase 2+: POS hiển thị biến thể khi bán
+     - Phase 2+: sinh mã cho web khác (chọn blog_id)
+     - Phase 2+: SP không tracking → biến thể chỉ để thống kê (không sinh lot)
+     - Phase 2+: báo cáo tốc độ bán theo biến thể
+
+  ⚠️ LƯU Ý:
+     - SL sinh mỗi lần nên giới hạn (≤ 2000) để tránh timeout
+     - Nếu sinh > 500 mã → nên dùng batch insert (1 query thay vì 500 query)
+     - In > 200 label 1 lần → JsBarcode có thể chậm → phân trang in
+
+
+================================================================================
+PHẦN 9 — CÁC BẢNG ẢNH HƯỞNG TÓM TẮT
+================================================================================
+
+  BẢNG MỚI:
+    + wp_global_product_variants (Phần 1.1)
+
+  BẢNG SỬA (thêm cột):
+    + wp_global_product_lots: thêm variant_id BIGINT DEFAULT NULL
+
+  BẢNG DÙNG LẠI (KHÔNG SỬA):
+    - wp_{blog_id}_local_product_name (A1) — query SP, thêm nhanh SP
+    - wp_{blog_id}_local_ledger (A3) — tạo phiếu type=16
+    - wp_{blog_id}_local_ledger_item (A4) — lưu SP + list_product_lots
+    - wp_global_product_lots (B2) — INSERT lot mới (mã sinh tự động)
+
+  CONSTANT MỚI:
+    TGS_LEDGER_TYPE_LOT_GENERATE = 16
+
+  TRẠNG THÁI MỚI (local_product_lot_is_active):
+    100 = Tự động sinh, chưa dán (MỚI)
+    1   = Tồn kho (đã dán, đã có sẵn)
+    0   = Đã bán
+    2   = Chờ duyệt (flow cũ)
+    3   = Đã hủy
+
+
+================================================================================
+PHẦN 10 — FILE TEXT NÀY DÙNG ĐỂ LÀM GÌ
+================================================================================
+
+  1. Khi bắt đầu code → đọc file này để hiểu toàn bộ kế hoạch
+  2. Khi hết token, hỏi lại AI → gửi file này → AI hiểu ngay context
+  3. Khi review → so sánh code với kế hoạch
+  4. Khi mở rộng → thêm phase mới vào PHẦN 7
+  5. Khi có bug → tra PHẦN 4-5 để hiểu luồng
+
+  LỆNH BẮT ĐẦU (nói với AI):
+    "Đọc file ke_hoach_plugin_sinh_ma_dinh_danh.text, triển khai Phase X"
+
+================================================================================
+  HẾT KẾ HOẠCH — CHỜ DUYỆT
+================================================================================

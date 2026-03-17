@@ -1,0 +1,58 @@
+bạn ơi, giờ hệ thống của tôi muốn toàn bộ sản phẩm trong hệ thống sẽ là có theo dõi. (nghĩa là 98% là có theo dõi tracking hsd nghĩa là phải in mã định danh để theo dõi)
+cái plugin chính tgs_shop_management  tôi nói nhanh file class-tgs-database.php  có bảng  chính theo dõi sản phẩm có theo dõi hsd mã định danh như sau, bảng này chỉ có duy nhất 1 bảng trong hệ thống multisite wordpress là wp_global_product_lots
+            global_product_lot_id BIGINT NOT NULL (khóa chính của bảng )
+            global_product_lot_barcode VARCHAR(255), (mã định danh của bảng)
+            local_product_name_id BIGINT, (khóa ngoại của bảng local_product_name  ví dụ blog id đã chọn ví dụ có tiền tố là wp_ thì bảng là wp_local_product_name nói chung đang tạo ở web nào thì check bảng ở web đó để gán khóa ngoại vào đây  )
+            global_product_lot_price DECIMAL(15,3)  (giá của sản phẩm ở bảng local_product_name tôi vừa nói)
+            source_blog_id BIGINT,
+            to_blog_id BIGINT, (chọn web nào để tạo )
+            local_product_lot_is_active TINYINT DEFAULT 2, ( mới tạo để trạng thái là 100 mã tạo tự động nhé, vì tôi đang cần làm chức năng sinh mã tự động mà )
+            product_lot_meta TEXT, ( các thông tin khác của mã định danh lưu kiểu json )
+            barcode_url TEXT,  (đường dẫn ảnh mã định danh)
+            lot_code VARCHAR(255), (mã lô dưới đáy lon - cột này ít xài, xài sau)
+            exp_date DATE, (hạn sử dụng)
+            supplier_name VARCHAR(255), (xài sau)
+            user_id INTEGER, (user wordpress tạo)
+            is_deleted TINYINT DEFAULT 0, (đã xóa chưa 0 với null là chưa xóa 1 là đã xóa)
+            deleted_at DATETIME, (thời gian xóa)
+            created_at DATETIME,
+            updated_at DATETIME,
+            local_product_barcode_main VARCHAR(500),
+            local_product_sku VARCHAR(255),  ( rất quan trọng, bắt buộc phải lưu local_product_sku của sản phẩm vì mỗi web blog id có bảng snar phẩm riêng khác nhau nhưng đề chung local_product_sku ý)
+            batch_id BIGINT, (tạm thời bỏ qua)
+      
+bạn ơi, nay đi khảo sát thực tế ý, thì hàng trong kho đã mua từ ncc có rất là nhiều trước đó ( hơn mấy nghìn mặt hàng, và số lượng kinh khủng) thế nên tôi không thể tạo phiếu mua hàng lại và nhập kho như tôi đã làm thủ công trước đó và chia batch rất rắc rối ( cái chia batch tôi sẽ tính toán sau)
+giờ nhé. do hàng rất phức tạp ví dụ có hàng khó kiểm soát như bỉm rồi áo, nó có nhiều biến thể màu sắc size các kiểu nhưng mà sku nó chỉ có 1 thôi. ( đang muốn như thế cho dễ)
+nghĩa là tôi muốn dán mã định danh đi theo các hàng đó mà trong kho rất bừa bộn, nên cần làm như nào cho tiện nhất. tôi đang muốn tạo thêm bảng biến thể.
+
+trong đó có cột  nghĩa là loại biến thể( có thể là kích thước, màu sắc, hạn sử dụng, hoặc gì đó nói chung để làm biến thể ý mà) 
+1 cột là giá trị ( nghĩa là màu gì, kích thước gì ). 
+nói chung tùy bạn trong bảng này.  ( làm màn hình thêm sửa xóa các cái liên quan đến biến thể)
+
+nói chung là tôi muốn ở bảng wp_global_product_lots  có cột để liên kết với bảng đó. sau này chỉ cần quét mã định danh ở bảng wp_global_product_lots là biết luôn nó thuộc biến thể nào 
+hoặc là gõ sku ở pos thì nó biết là đang có bao nhiêu biến thể. bấm vào đó sẽ bán được số lượng đối với sản phẩm màu gì hay gì đó ( đấy là sản phẩm ko theo dõi) 
+còn có theo dõi quét mã định danh là cũng biết rồi. 
+
+à bảng biến thể cũng cần sau này làm như nào batch của tôi cũng có thể liên kết đến biến thể đó ( ý là sau này thôi )
+nói chung là tùy biến. 
+
+mục đích của tôi là có 1 màn hình tạo tự động nhanh mã định danh cho 1 sản phẩm nào đó, thậm chí chưa có sản phẩm thì thêm nhanh sản phẩm với mã sku bất kì ngẫu nhiên
+rồi chọn loại biến thể để gán.  rồi sau đó bắt đầu tạo mã định danh dựa vào biến thể đó ( tức là sinh bản ghi mới ở bảng wp_global_product_lots rồi gán liên kết đến biến thể đó)
+ý tôi là thế. còn sau tôi sẽ gán batch sau để thống kê tốc độ bán. 
+màn hình này bạn tự sáng tạo giao diện dễ dùng thân thiện nhé, ko icon lòe loẹt đâu. với cả là khi sinh mã định danh rồi, thì có thể xóa đi được nhé.  và nếu người kho đã dán mã RỒI 
+thì sẽ có bước tích nhanh các mã đó để đổi trạng thái thành tồn kho. tức là local_product_lot_is_active thành 1, còn lúc đầu tạo tự động thì local_product_lot_is_active là 100 là tạo tự động. 
+ý tôi là thế. vì biết đâu lúc in mã ra thì kho lại dán thừa... nhiều trường hợp xảy ra. 
+
+mặc định màn hình này shop tạo chọn là website hiện tại nhé, các bảng local_product_name là của web này luôn  
+tôi nói ý tưởng như thế. bạn hãy làm 1 plugin hoàn toàn mới hook vào sibar menu của plugin tgs_shop_management nhé. còn mã được tạo như nào, và in mã như nào. 
+bạn hãy tham khảo trang ticket create ( loại phiếu tạo phiếu mua hàng) và trang ticket detail (chi tiết phiếu mua hàng khối Chi tiết sản phẩm có theo dõi HSD nhé. )
+tham khảo cách sinh mã  ví dụ 4281335871350  bạn đọc code là hiểu ý mà. và bảng sản phẩm là local_product_name nhớ là có tiền tố blog id nào ở web site hiện tại nhé. sau này làm chức năng tạo mã định danh cho web khác thì chọn web khác ở ngay màn hình đó ( phát triển sau)
+bạn rà soát rồi nói có khả thi không. rồi đưa ra kết hoạch 1 file text mới để làm theo luồng đó, cũng như sau mà đang làm dở hỏi bạn, mà hết token thì tôi hỏi lại file đó, vẫn oke, AI vẫn hiểu nhé. 
+nhớ các chức năng làm component dễ phát triển, giao diện thân thiện nhé. chức năng dễ bảo trì phát triển. và đáp ứng được thực TẾ
+
+à khi tạo 1 phiếu sinh mã tự động đó thì tận dụng lưu vào bảng local_ledger (đặt type khác di) với local_ledger_item nhé ( bảng này lưu được sản phẩm không theo dõi và có theo dõi đó ) thì trước mắt trang này bạn chỉ báo là hiện chỉ áp được cho sản phẩm có theo dõi hsd thôi, check validate ý mà 
+nói chung là  vì bảng local_ledger_item đã có cột list_product_lots để lưu list json id bảng wp_global_product_lots rồi ý ( các mã đã được sinh tự động) 
+nghĩa là sẽ có một trang tạo mới và 1 trang chi tiết phiếu đó gồm các mã, và cũng có phần in mã định danh nhưng trang này nó nhiều chức năng liên quan đến áp dụng thực tế hơn , ( kiểu xây dựng gấp để mai triển khai ý)
+và có thể xóa mã định danh thừa ( chắc chắn khi xóa nó cũng cập nhật lại list_product_lots ở bảng local_ledger_item rồi ( xóa vĩnh viễn mà với cả có phần tích nhanh nhiều mã kiểu đã dán đế đâu  thì cập nhật tức là cho nó thành trạng thái local_product_lot_is_active là 1 còn trong kho ý mà, nhiều khi ae trong thực tế chia nhau việc nên biết đã dán hết những gì)
+phần in mã vẫn phải tham khảo trang ticket detail nhé. ( vì in theo fomat đó chuẩn, có cả cấu hình in các kiểu rồi đó. bạn phải bám sát nhé). bạn hãy khảo sát rồi viết 1 file text để treienr khai plugin hook vào sibar plugin tgs_shop_management nhé. bạn hiểu ý tôi chứ. viết file text tổng hợp trước từng bước triển khai đi. 
+rồi nói cho tôi biết chức năng này cần gấp đúng như tôi nghĩ ko. cần thiết ko. ý là thế
