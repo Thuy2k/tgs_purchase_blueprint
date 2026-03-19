@@ -1,0 +1,89 @@
+bạn ơi, bạn đọc file ke_hoach_plugin_sinh_ma_dinh_danh.text và file ke_hoach_plugin_dinh_danh_thung_hang.text
+ để hiểu cách sinh mã định danh, xuất phát từ sản phẩm và có chọn tạo nhiều biến thể khác nhau để sinh mã định danh
+( tôi quan tâm mã định danh sản phẩm trước, thùng định danh để sau).
+ nay tôi đi triển khai thực tế ở chi nhánh Phú Thọ thì cách đó cũng gần oke nhưng mà nó phức tạp ở cái là đang có rất nhiều hàng ở trong kho 
+ ví dụ như quần áo thì khi ở trong kho lúc nhập kho nó có nhiều biến thể kết hợp như màu đỏ (dành cho bé từ 1 đến 3 tháng tuổi) hoặc là màu đỏ (kết hợp với dành cho bé từ 4 đến bao nhiêu tháng) 
+ ý là thế, kể cả là kích cỡ cũng thế. nghĩa là có nhiều biến thể kết hợp cùng lúc. 
+ Nên là thiết kế database bảng hiện tại. bạn xem bảng biến thể đó cần điều chỉnh gì cho hợp lý . để đa dạng biến thể. 
+ và làm sao cho lúc mà nhập kho xong có thể thống kê dễ dàng ví dụ thống kê áo tên là A là bao nhiêu. kết hợp thêm biến thể màu đỏ là bao nhiêu. thậm chí kết hợp thêm nhiều biến thể khác để ra số lượng thống kê sau này dễ dàng ý là thế. 
+ mà mã định danh sản phẩm ở bảng wp_global_product_lots phải có cột liên kết đến phần biến thể kết hợp đó. 
+ thì kể cả có 100 biến thể thì cũng hoàn toàn thống kê dễ dàng được.  bạn có thể cân nhắc sử dụng json (nếu mà bạn thực sự thấy cần)
+ miễn sao sau này thống kê các cái dễ dàng.  thì bạn phải tham khảo databse hiện tại. 
+ nếu cần thay đổi cột hoặc thêm bảng mới thì bạn triển khai.  
+ Nhưng mà tôi muốn bạn đổi tên folder tgs_lot_generator  đi thành backup ( nói chung là coi như vứt hẳn đi)
+ để làm plugin mới với các chức năng mới phù hợp hơn cho biến thể. với cả chức năng này mới là cái tôi nói đến này. vì nó cần thiết hơn 
+ thực tế chức năng chọn biến thể rồi sinh mã như plugin tgs_lot_generator đã làm ( thì cũng oke ) nhưng mà đó nên là chức năng phát triển sau. 
+
+ giờ tôi muốn bạn tạo 1 plugin tên phù hợp hơn với các chức năng sau đây này cũng hook vào sidebar plugin tgs_shop_managemment 
+ chức năng một màn hình sẽ là sinh ra mã định danh tương tự cách sinh mã đã làm trước đó 7576177261306 (kiểu mã 13 gì đó)
+ mã này ko cần gắn tên hay bất kể biến thể gì trước, nói chung là mã định danh nhưng chưa được định danh sản phẩm vào đó. 
+ nó chỉ là mã trống . bạn hãy tận dụng bảng wp_local_ledger (wp_ là tiền tố blog id của website multisite hiện tại) 
+ thì tôi muốn là nó như là 1 phiếu tạo ra mã định danh với local_ledger_type bạn cứ để là 30 đi.  (phiếu sinh mã)   
+ thì sẽ sinh ra các mã vào bảng wp_global_product_lots với local_product_lot_is_active là 200 tức là sinh ra nhưng chưa được định danh 
+ tôi tạm để số 200 cho to ( kiểu như là mã mới sinh ra thôi á) vẫn có thể in ra để dán. bạn tham khảo màn hình Chi tiết phiếu định danh sản phẩm (plugin mà tôi vừa bảo sẽ ko xài đến nữa)
+ để xem cách in. ( nhưng mà như tôi bảo là nó đơn giản là ko in ra thông tin gì ngoài mã code  thôi) 
+ rồi sẽ định danh sản phẩm sau cho mã đó ( tôi sẽ nói nguyên nhân vì sao làm thế) nó sẽ khác biệt với cách mà plugin tgs_lot_generator đã làm là chọn biến thể rồi sinh mã ( thì cái này chức năng này cũng cần nhưng sẽ làm sau )
+
+ý tôi làm thế. là tiếp theo tôi sẽ cần bạn có 1 màn hình là định danh sản phẩm.  
+ở đó sẽ đặt tên cho phiếu wp_local_ledger (kiểu như là định danh chung chung gì đó có thể đặt tên là định danh ngày hôm nay hoặc là định danh cho sản phẩm quần áo trẻ em hãng A )
+thì ở màn hình này cho phép chọn biến thể (thậm chí có thao tác nhanh là thêm nhanh biến thể bằng modal hay gì đó ) nói chung là hạn chế mở nhiều màn hình nhất có thể , kể cả lúc thêm sản phẩm cũng thế. 
+( bạn có thể tham khảo thêm cả phần đó ý tôi nói ở phần trang Tạo mã định danh sản phẩm ở plugin tôi bảo tạm dừng nãy đã xử lý phần này rồi). mình tận dụng lại logic tương tự .  
+nhưng mà ở một màn hình định danh sản phẩm này.  nó sẽ chia thành nhiều khối thao tác nh anh 
+thêm nhiều sản phẩm trong một màn hình. 
+mỗi khối đó (lại có cacsc khối con là các biến thể) hoặc thậm chí chính sản phẩm đó là một khối con ( vì đôi khi nó ko có biến thể)
+nói chung là giao diện kiểu dễ trực quan phân biệt. (và tất nhiên biến thể rất đa dạng và dễ thống kê như tôi đã nói)
+và mỗi khối đó sẽ có chức năng bấm vào đó . mở modal quét nhanh các mã định danh sản phẩm đã in trước đó ( mà chưa được định danh - kiểu phải validate)  nếu ko phải có cảnh báo ngay ở modal thêm mã định danh vào khối đó 
+nói chung là sau khi thấy oke thì bấm oke đóng modal. nó sẽ cập nhật ngay vào db. các mã đó sẽ được gán vào sản phẩm ( hoặc biến thể đó) 
+kiểu sẽ được định danh ngay khi bấm ok tắt modal. và khi tắt rồi sẽ có thống kê nhanh trên màn hình ở khối đó , bao nhiêu sản phẩm được định danh bên trong. ý là thế. bấm vào để xem modal nhanh các mã. 
+
+thì ở màn hình định danh sản phẩm, sẽ có nhiều khối dạng như vậy. và nút thao tác nhanh . 
+
+với cả là để còn nhanh hơn nữa. thì phần định danh sản phẩm sẽ có các tab bên trái (hoặc bên phải tùy bạn) nó sẽ có phần tìm kiếm nhanh các trang định danh sản phẩm đang thao tác. 
+và thậm chí bấm vào nó sẽ có các tab ở trên. để dễ dàng quay lại trang đang thao tacsc  trước đó.  và tất nhiên sẽ có phần xóa phần trang định danh sản phẩm đang thao tác. 
+tức là sẽ có rất nhiều tab trang định danh sản phẩm. mỗi trang thì có thể có nhiều khối .  
+và giao diện thân thiện nhiều chức năng cần thiết cho người dùng.  
+ở trên cùng sẽ có phần tìm kiếm nhanh mã định danh để biết mã đó đã được định danh chưa. nếu có rồi, sẽ tự gõ phiếu định danh sản phẩm vào sibar , để thấy được trang đó. rồi focus vào khối đó. 
+để có thể nhiều khi sẽ có thao tác gỡ phần định danh sản phẩm ra khỏi mã định danh đó ( để mã định danh đó có thể được định danh lại ở cac skhoois khác).  nhớ là môi thao tác mà ở modal bấm lưu oke thì tức là mã đó đã chuyển trạng thái thành 1 là đã ở trong kho với snar phẩm ( có thể có biến thể đó - tôi nhắc đi lại nhiều lần cho bạn nhớ) 
+nói chung tôi đưa ý tưởng thế. còn bạn có thể thiết kế sao phù hợp hơn nữa, hoặc bạn thấy tôi ko hợp lý, bạn có ý tưởng dễ dùng hơn thì bạn cứ triển khai . 
+à bạn nhớ làm cho cả điện thoại responsive nhé. ( vì điện thoại cũng dùng nhiều). 
+điện thoại thì sẽ có các phần thao tác nhìn đơn giản hơn ( ý là thế) 
+
+nhớ là khi bấm tạo phiếu định danh thì phải điền các thông tin như tên phiếu. ( bạn cũng phải tự fill sẵn tên phù hợp như phiếu định danh gì đó mã gì đó rồi người dùng cũng có thể sửa lại )
+rồi tự fill giờ ngày tạo phiếu, email người đang tạo. bảo người dùng phải bấm lưu thì mới thêm được các khối định danh liên quan bên trong nhé.
+rồi bấm lưu rồi. thì sẽ có thêm dấu + thêm nhanh pheieus khác để nó vào tab sibar. nói chung rất đa dạng. 
+mỗi pheieus thì sẽ có các khối định danh như tôi bảo đó. 
+
+với cả là tại sao lại làm thế, mà ko tạo biến thể rối sinh mã ra dán, vì hàng ngày có hơn 20000 sản phẩm khác nhau, nên mà in ra rồi mò dán vào sản phẩm màu sắc với size đó thì sẽ dễ nhầm
+thay vì thế thao tác ngay trên màn hình, quét mã rồi định danh cho mã đó  vào sản phẩm (có biến thể đó hoặc ko biến thể)
+nói chung như thế dễ đỡ nhầm hơn.  và các mã đã được dán toàn bộ trước ấy rồi. trước khi đến màn hình này. 
+nên chỉ việc scan nếu chưa định danh thì định danh bấm ok modal cho vào tổn kho trạng thái 1. (đơn giản thể thối)
+nhưng bản chất là giao diện thân thiện dễ dùng với người dùng. (tôi cần là như thế)
+và ko màu mè icon khó dùng. ( bạn nên làm đơn giản hóa thân thiện) nhưng mà giao diện vẫn mang tính hiện đại 
+code vì nhiều chức năng cần viết các component , dễ bảo trì, phát triển.. 
+và hạn chế phải sang màn hình khác tạo sản phẩm (hay biến thể). tất nhiên cũng có màn hình tạo riêng cho phần đó (nhưng đó là giao diện khác cũng cần có nhé)
+với cả là nhớ tham khảo cách plugin tgs_lot_generator đã làm trước đó.  
+nó có cả chức năng định danh các mã định danh vào 1 thùng đã tạo trước đó.  
+
+nói chung là rất nhiều chức năng mới. ( để phục vụ thực tế) 
+bảng databse sẽ khác đi. cột cũng có thể khác.  
+
+nhưng vẫn phải thuận tiện sau này thống kê, hoặc vào xem lại danh sách định danh sản phẩm, ( sẽ dễ nhìn thấy thống kê)
+và tiện cho sau này quét mã định danh nào sẽ biết luôn là sản phẩm đó là gì biến thể gì. ý là thế. 
+
+bản chất là thao tác tiện nhất cho kho. vì mỗi ngày kho làm nhiều nhiệm vụ lắm. 
+và hàng trong kho đang có rất nhiều mấy trăm nghìn sản phẩm.  
+
+
+à cái phần lúc đầu sinh ra nhiều mã định danh, phải có một màn hình chi tiết phiếu xem các mã được in ra, bấm tìm kiếm để xem trạng htais của mã đó nhé.
+vì mỗi lần có thể in ra 1000 mã. howajc nhiều hơn , nên bạn cần code tự băm nhỏ thông minh để sau này vào server ko bị treo nhé. 
+và có tiến độ chạy đã in thành công bao nhiêu mã, ý là thế
+
+và trong quá trình xây dựng plugin mới này. có lỗi gì phải hiển thị ra giao diện để biết nhé.  
+rồi bạn viết giúp tôi 1 file text xuyên suốt để tôi sau này làm prompt ai hết token hay gì, đọc lại nó vẫn hiểu nhé. 
+
+cái folder wp-content/plugins/tgs_lot_generator bạn vứt ra hẳn root đi, để nó ko còn trong plugin nữa. (mang tính tham khảo thôi)
+còn bạn tạo plugin mới để tên khác cho tôi nhé.  
+
+với nếu bảng database thêm hoặc thay đổi, bạn sửa giúp tôi file class-tgs-database  nhé. nếu thêm migration mới thêm cột hay sửa cột thì bạn nhớ import ở file class-tgs-database nhé
+
+nói chung giờ viết 1 text để làm prompont xuyên suốt đi giúp tôi nhé 
