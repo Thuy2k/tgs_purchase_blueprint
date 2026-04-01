@@ -46,7 +46,7 @@ add_filter('tgs_shop_dashboard_routes', function ($routes) {
 /* ────────────────────────────────────────────────────────────────────────── */
 /*  2. Sidebar menu — nhóm collapsible "Blueprint Mua Bán"                  */
 /* ────────────────────────────────────────────────────────────────────────── */
-add_action('tgs_shop_sidebar_menu', function ($current_view) {
+add_action('tgs_shop_docs_menu', function ($current_view) {
 
     $menu = [
         'bp-tong-quan'      => ['bx-home-circle',   'Tổng Quan'],
